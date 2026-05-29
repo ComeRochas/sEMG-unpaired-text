@@ -1,0 +1,32 @@
+# Defaults for scripts/finetune_from_jepa.py.
+# CLI flags override these; these override script-level defaults.
+
+cache_dir: /scratch/cr4206/sEMGencoderJEPA/data
+output_directory: /scratch/cr4206/sEMGencoderJEPA/runs/jepa_finetune
+
+# pretrained_encoder must be supplied via CLI (no sensible default).
+pretrained_encoder: /scratch/cr4206/sEMGencoderJEPA/runs/jepa_pretrain/pretrained_encoder_20260507_1303.pt
+epochs: 200
+max_batch_len: 88000  # matches baseline (legacy 128000 was in raw 1000 Hz units; this is 689 Hz / 8*T)
+fixed_raw_len: 1600   # matches proven-good baseline (3200 overfits at this dataset size)
+
+learning_rate: 2.0e-4
+learning_rate_warmup: 500
+lr_decay_milestones: [125, 150, 175]   # mirrors baseline's [125,150,175] @ 200 epochs, scaled to 200 epochs
+lr_decay_gamma: 0.5
+weight_decay: 0.0
+grad_accum_steps: 2   # matches baseline so the effective per-step batch budget is identical
+freeze_encoder: false
+clip_grad_norm: 0.0   # disabled: never fires at 10.0 anyway, old finetune used no clip
+
+model_size: 768
+num_layers: 6
+dropout: 0.2
+
+eval_method: beam     # matches baseline: best.pt is LM-WER-selected
+
+wandb: false
+wandb_entity: UMLforVideoLab
+wandb_project: JEPAforsEMG
+wandb_run_name: null
+wandb_tags: []

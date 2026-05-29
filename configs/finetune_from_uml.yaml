@@ -1,0 +1,37 @@
+# Defaults for scripts/finetune_from_uml.py.
+# Aligned with train_baseline.yaml so the fine-tune optimizer dynamics match
+# the supervised baseline run — the supposed reference for "post-UML
+# performance on EMG alone".
+
+cache_dir: /scratch/cr4206/sEMGencoderJEPA/data
+output_directory: /scratch/cr4206/sEMGencoderJEPA/runs/finetune_from_uml
+
+# Required: path to either an EMG-branch checkpoint (preferred) or a full
+# UMLModel checkpoint. Override at submission time.
+emg_branch: /scratch/cr4206/sEMGencoderJEPA/runs/uml/best_emg_branch.pt
+uml_full_ckpt: null
+
+epochs: 200
+max_batch_len: 88000        # matches baseline & UML (128s of audio per batch)
+fixed_raw_len: 1600
+
+learning_rate: 3.0e-4       # matches baseline; encoder + head are warm-started
+learning_rate_warmup: 1000  # matches baseline
+lr_decay_milestones: [125, 150, 175]
+lr_decay_gamma: 0.5
+weight_decay: 0.0
+grad_accum_steps: 2         # matches baseline's effective batch budget
+freeze_encoder: false
+clip_grad_norm: 0.0
+
+model_size: 768
+num_layers: 6
+dropout: 0.2
+
+eval_method: beam           # matches baseline: best.pt is LM-WER-selected
+
+wandb: false
+wandb_entity: UMLforVideoLab
+wandb_project: JEPAforsEMG
+wandb_run_name: null
+wandb_tags: [finetune_from_uml]

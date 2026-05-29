@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+logs/
+data/
+.claude
+.codex
+wandb/
+runs/
+/data

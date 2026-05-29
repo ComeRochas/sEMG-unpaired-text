@@ -1,0 +1,12 @@
+{
+  "normalizers_file": "/scratch/cr4206/silent_speech/normalizers.pkl",
+  "testset_file": "/scratch/cr4206/silent_speech/testset_largedev.json",
+  "silent_data_directories": [
+    "/scratch/cr4206/data/emg_data/emg_data/silent_parallel_data"
+  ],
+  "voiced_data_directories": [
+    "/scratch/cr4206/data/emg_data/emg_data/voiced_parallel_data",
+    "/scratch/cr4206/data/emg_data/emg_data/nonparallel_data"
+  ],
+  "remove_channels": []
+}

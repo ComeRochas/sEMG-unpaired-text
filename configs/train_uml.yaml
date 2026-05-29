@@ -1,0 +1,54 @@
+# Defaults for scripts/train_uml.py.
+# CLI flags override these; these override script-level defaults.
+
+cache_dir: /scratch/cr4206/sEMGencoderJEPA/data
+librispeech_cache_dir: /scratch/cr4206/sEMGencoderJEPA/data/libri_cache
+librispeech_split: train-clean-100
+output_directory: /scratch/cr4206/sEMGencoderJEPA/runs/uml
+
+epochs: 200
+max_batch_len: 88000  # matches baseline: 128000 @ 1000 Hz == ~88000 @ 689 Hz
+fixed_raw_len: 1600   # matches proven-good baseline (3200 overfits at this dataset size)
+audio_batch_size: 8
+audio_num_workers: 2
+
+learning_rate: 3.0e-4
+learning_rate_warmup: 1000
+l2: 0.0
+grad_accum_steps: 1
+lr_decay_milestones: [125, 150, 175]
+lr_decay_gamma: 0.5
+clip_grad_norm: 1.0   # acts as gradient brake on noisier audio path; do not raise without rebalancing lambda_uml
+
+# Auxiliary audio CTC loss weight: total = loss_emg + lambda_uml * loss_audio
+lambda_uml: 1.0
+
+# If true, EMG and audio branches use the SAME CTCHead (one shared linear
+# readout). Default false: each branch has its own CTC head — matches the
+# reference implementation, lets each modality specialize its readout.
+share_ctc_head: false
+
+# Epoch definition:
+#   alternate (default): each step does 1 EMG batch + 1 audio batch (paired
+#                        backward, one optim.step). Epoch length = n_emg_batches;
+#                        audio sees only a fraction of its dataset per epoch.
+#   both              : each step does 1 batch from ONE modality. Schedule =
+#                        all EMG batches + all audio batches, shuffled. Every
+#                        batch from both datasets is processed exactly once
+#                        per epoch. Audio dominates because it has more
+#                        batches; tune lambda_uml to rebalance.
+epoch_mode: alternate
+
+model_size: 768
+num_layers: 6
+dropout: 0.2
+
+start_training_from: null
+
+eval_method: beam   # greedy (fast, no LM) or beam (slow, LM if available)
+
+wandb: false
+wandb_entity: UMLforVideoLab
+wandb_project: JEPAforsEMG
+wandb_run_name: null
+wandb_tags: [uml]
