@@ -72,7 +72,7 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--config", default=None,
                    help="Path to YAML config; CLI flags override its values.")
-    p.add_argument("--cache-dir", default="/scratch/cr4206/sEMGencoderJEPA/data")
+    p.add_argument("--cache-dir", default="/scratch/cr4206/sEMG-unpaired-text/data")
     p.add_argument(
         "--emg-branch", default=None,
         help="Path to a *_emg_branch.pt file (encoder.* + ctc_head.* keys). "
@@ -85,7 +85,7 @@ def parse_args():
     )
     p.add_argument(
         "--output-directory",
-        default="/scratch/cr4206/sEMGencoderJEPA/runs/finetune_from_uml",
+        default="/scratch/cr4206/sEMG-unpaired-text/runs/finetune_from_uml",
     )
     p.add_argument("--epochs", type=int, default=200)
     p.add_argument("--max-batch-len", type=int, default=88000)

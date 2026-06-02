@@ -79,29 +79,32 @@ def _ensure_unigrams(lm_path, unigrams_path):
     return _cached_unigrams["unigrams"]
 
 
-def build_decoder(chars, lm_path="data/lm.binary", unigrams_path="data/unigrams.txt",
+def build_decoder(tokenizer, lm_path="data/lm.binary", unigrams_path="data/unigrams.txt",
                   alpha=1.5, beta=1.85):
-    labels = list(chars) + [""]   # blank last, aligned with logits
+    labels = list(tokenizer.labels) + [""]   # blank last, aligned with logits
 
     kwargs = {}
-    if _check_lm_available(lm_path):
+    # The KenLM word LM + unigrams only make sense for word-decodable units
+    # (char, subword). Phoneme/other units beam-search without an LM.
+    if tokenizer.supports_word_lm and _check_lm_available(lm_path):
         kwargs["kenlm_model_path"] = lm_path
         kwargs["alpha"] = alpha
         kwargs["beta"] = beta
-
-    unigrams = _ensure_unigrams(lm_path, unigrams_path)
-    if unigrams is not None:
-        kwargs["unigrams"] = unigrams
+        unigrams = _ensure_unigrams(lm_path, unigrams_path)
+        if unigrams is not None:
+            kwargs["unigrams"] = unigrams
 
     return build_ctcdecoder(labels, **kwargs)
 
 
-def _collate_eval(batch):
-    raw_list = [ex["raw_emg"] for ex in batch]
-    seq_lens = torch.tensor([r.shape[0] // 8 for r in raw_list])
-    raw_padded = torch.nn.utils.rnn.pad_sequence(raw_list, batch_first=True)
-    texts = [ex["text"] for ex in batch]
-    return raw_padded, seq_lens, texts
+def _make_eval_collate(downsample_factor):
+    def _collate_eval(batch):
+        raw_list = [ex["raw_emg"] for ex in batch]
+        seq_lens = torch.tensor([r.shape[0] // downsample_factor for r in raw_list])
+        raw_padded = torch.nn.utils.rnn.pad_sequence(raw_list, batch_first=True)
+        texts = [ex["text"] for ex in batch]
+        return raw_padded, seq_lens, texts
+    return _collate_eval
 
 
 def _greedy_collapse(int_seq, blank_id):
@@ -119,7 +122,8 @@ def compute_log_probs(model, dataset, device, batch_size=None):
     model.eval()
     on_gpu = str(device).startswith("cuda")
     bs = batch_size if batch_size is not None else (16 if on_gpu else 1)
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=bs, collate_fn=_collate_eval)
+    collate = _make_eval_collate(getattr(dataset, "downsample_factor", 8))
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=bs, collate_fn=collate)
 
     log_probs_list, references = [], []
     with torch.no_grad():
@@ -128,7 +132,7 @@ def compute_log_probs(model, dataset, device, batch_size=None):
             lp = F.log_softmax(model(raw_padded), -1).cpu()
             for i, T in enumerate(seq_lens.tolist()):
                 log_probs_list.append(lp[i, :T].numpy().astype(np.float32))
-                references.append(dataset.text_transform.clean_text(texts[i]))
+                references.append(dataset.tokenizer.reference_text(texts[i]))
     model.train()
     return log_probs_list, references
 
@@ -155,13 +159,13 @@ def evaluate(model, dataset, device, method="greedy", batch_size=None,
     log_probs_list, references = compute_log_probs(model, dataset, device, batch_size)
 
     if method == "greedy":
-        blank_id = len(dataset.text_transform.chars)
+        blank_id = dataset.tokenizer.blank_index
         predictions = [
-            dataset.text_transform.int_to_text(_greedy_collapse(lp.argmax(-1).tolist(), blank_id))
+            dataset.tokenizer.int_to_text(_greedy_collapse(lp.argmax(-1).tolist(), blank_id))
             for lp in log_probs_list
         ]
     else:
-        decoder = build_decoder(dataset.text_transform.chars,
+        decoder = build_decoder(dataset.tokenizer,
                                 lm_path=lm_path, unigrams_path=unigrams_path,
                                 alpha=alpha, beta=beta)
         predictions = _decode_beam(log_probs_list, decoder, beam_width, num_workers)
@@ -182,7 +186,7 @@ def grid_search(model, dataset, device, beam_widths, alphas, betas,
     results = []
     combos = list(product(alphas, betas, beam_widths))
     for alpha, beta, bw in tqdm.tqdm(combos, "GridSearch", disable=None):
-        decoder = build_decoder(dataset.text_transform.chars,
+        decoder = build_decoder(dataset.tokenizer,
                                 lm_path=lm_path, unigrams_path=unigrams_path,
                                 alpha=alpha, beta=beta)
         preds = _decode_beam(log_probs_list, decoder, bw, num_workers)

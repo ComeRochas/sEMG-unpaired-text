@@ -17,11 +17,38 @@ audio modality for **text** and adds the token-resolution study.
 
 ## Phase 2 plan
 
-See [TODO.md](TODO.md). Three axes:
-1. **Text as the unpaired modality** — large generic corpus vs Gaddy transcripts (try both).
-2. **Token resolution** — char / subword / phoneme; pick the adapted temporal resolution and
-   re-train a supervised baseline per resolution.
-3. **Supervised and unsupervised** settings.
+See [TODO.md](TODO.md). Priority order:
+1. **Target unit × token resolution** (current focus, implemented): predict char / subword /
+   phoneme and tune the EMG token temporal resolution to match; re-train a supervised
+   baseline per (unit, resolution).
+2. **Text as the unpaired modality** (next) — large generic corpus vs Gaddy transcripts.
+3. **Supervised then unsupervised** settings.
+
+### Target unit & token resolution (implemented)
+
+The CTC **unit** (`char`/`subword`/`phoneme`) and the EMG **token resolution**
+(`conv_strides` → downsample factor) are config knobs threaded through `train_baseline.py`
+and `evaluate.py`. The EMG cache stores raw `text`, so units re-encode on the fly (no
+recache). See [CLAUDE.md](CLAUDE.md) for the design.
+
+```bash
+# Character baseline at 8x (default ~86 Hz)
+UNIT=char CONV_STRIDES="2 2 2" OUTPUT_DIR=runs/baseline_char_8x sbatch slurm/train_baseline.slurm
+
+# Subword baseline: first train a SentencePiece model, then train at a coarser 16x rate
+python scripts/train_subword.py --vocab-size 500     # -> data/tokenizers/subword_500.model
+UNIT=subword SUBWORD_MODEL=data/tokenizers/subword_500.model \
+  CONV_STRIDES="2 2 2 2" OUTPUT_DIR=runs/baseline_subword_16x sbatch slurm/train_baseline.slurm
+
+# Phoneme baseline (needs a G2P backend: `pip install g2p_en` or --phoneme-dict cmudict.txt)
+UNIT=phoneme CONV_STRIDES="2 2 2" OUTPUT_DIR=runs/baseline_phoneme_8x sbatch slurm/train_baseline.slurm
+
+# Evaluate (pass the SAME unit/strides the checkpoint was trained with)
+UNIT=subword SUBWORD_MODEL=data/tokenizers/subword_500.model CONV_STRIDES="2 2 2 2" \
+  CHECKPOINTS=runs/baseline_subword_16x/best.pt sbatch slurm/evaluate.slurm
+```
+
+> Requires `sentencepiece` (installed in the env) for the subword unit.
 
 ## Setup
 
@@ -55,7 +82,8 @@ CHECKPOINTS="runs/baseline/best.pt" GRID_SEARCH=1 sbatch slurm/evaluate.slurm
 
 | File | Purpose |
 |------|---------|
-| `scripts/train_baseline.py` | Supervised CTC baseline |
+| `scripts/train_baseline.py` | Supervised CTC baseline (`--unit char/subword/phoneme`, `--conv-strides`) |
+| `scripts/train_subword.py` | Train a SentencePiece subword tokenizer (prerequisite for `--unit subword`) |
 | `scripts/train_uml.py` | Dual-branch shared-Transformer UML (audio = template for text branch) |
 | `scripts/finetune_from_uml.py` | CTC finetune from UML EMG-branch (encoder + EMG head) |
 | `scripts/finetune_from_jepa.py` | CTC finetune from any encoder-only pretrain (head reset) |

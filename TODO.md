@@ -16,19 +16,32 @@
 
 ## Workstreams
 
-### A. Tokenization infrastructure (prerequisite)
-- [ ] Add subword tokenizer (e.g. SentencePiece/BPE) and phoneme tokenizer (e.g. g2p_en /
-      CMUdict) alongside the existing char `TextTransform`. One config knob selects
-      resolution; CTC vocab + blank index derived from it.
-- [ ] Make `text_int` in the EMG cache resolution-aware (re-encode from `text`, no signal
-      recompute needed). Keep KenLM/beam decoding working per resolution (subword/phoneme LMs
-      or decode-then-detokenize).
+### A. Tokenization + resolution infrastructure — **DONE**
+- [x] Pluggable target-unit tokenizer (`semg_jepa/tokenizers.py`): `char` (port of the
+      phase-1 `TextTransform`), `subword` (SentencePiece, train with
+      `scripts/train_subword.py`), `phoneme` (ARPAbet + `|`; needs a G2P backend). Selected
+      by `--unit`; vocab + blank index + decode/reference rendering all derive from it.
+- [x] Cache stays unit-agnostic: `CachedRawEMGDataset` re-encodes `text_int` from the stored
+      raw `text` per tokenizer — **no recache per unit**.
+- [x] Configurable EMG token resolution: `GaddyRawEMGEncoder(conv_strides=...)` →
+      downsample factor `prod(conv_strides)`; dataset right-crops raw to a multiple of it.
+      Threaded through `train_baseline.py` + `evaluate.py` (`--unit`, `--conv-strides`).
+- [x] Beam decode is unit-aware: KenLM word LM applies for char/subword (SentencePiece `▁`
+      handled by `pyctcdecode`); phoneme beams without an LM (reported metric = phone error
+      rate). Greedy works for all units.
 
-### B. Supervised baselines per resolution
-- [ ] Re-train the supervised CTC baseline at char / subword / phoneme resolution.
-- [ ] Pick the adapted **token resolution** per case (frames-per-token ratio vs EMG frame
-      rate ~86 Hz). Report test WER/CER per resolution. This is the reference each text-UML
-      experiment is measured against.
+### B. Supervised baselines per (unit × resolution) — **NEXT (run these)**
+- [ ] Train the char baseline at 8× as the reference (`runs/baseline_char_8x`), confirm it
+      reproduces phase-1 (~0.31–0.33 test WER).
+- [ ] Subword: train `scripts/train_subword.py` (sweep `--vocab-size`, e.g. 250/500/1000),
+      then baselines sweeping `conv_strides` (8× vs 16×) to find the resolution that matches
+      the coarser unit.
+- [ ] Phoneme: install a G2P (`pip install g2p_en`) or drop in a CMUdict, then baseline at
+      8× (and finer 4× if phones are dense).
+- [ ] Report test WER/CER (PER for phoneme) per (unit, resolution). This is the reference
+      each unpaired-text experiment is measured against.
+- Open question: does a coarser unit + matched-coarser EMG resolution beat char-8×? (fewer
+  CTC frames → less peaky alignment, but a larger softmax and sparser supervision.)
 
 ### C. Text as the unpaired modality
 - [ ] Build a `TextFrontend` (text → embedding sequence feeding the shared transformer) and

@@ -19,18 +19,23 @@ transfer at full labels. (Full phase-1 results: see the archived repo's `TODO.md
 
 ### Phase 2 direction (this repo)
 
-Three axes — see [TODO.md](TODO.md):
-1. **Text as the unpaired modality** (replacing / complementing the audio branch). Two text
-   corpora to compare: a large generic English corpus vs the transcripts shipped with the
-   Gaddy audio.
-2. **Token resolution**: characters / subwords / phonemes. Study the adapted temporal token
-   resolution in each case and **re-train a supervised baseline per resolution**.
-3. **Supervised and unsupervised** settings.
+Priority order (see [TODO.md](TODO.md)):
+1. **Target unit × token resolution** (implemented, in progress): predict **characters /
+   subwords / phonemes**, and **tune the EMG token temporal resolution** to match the
+   chosen unit. Re-train a supervised baseline per (unit, resolution). *This is the current
+   focus and is wired into `train_baseline.py`.*
+2. **Text as the unpaired modality** (next): add a text branch to the shared transformer
+   (mirroring the kept audio branch), comparing a large generic corpus vs the Gaddy
+   transcripts.
+3. **Supervised then unsupervised** settings.
+
+(A Conformer encoder was considered and **deferred** — not in scope now.)
 
 ## Cluster & environment
 
 - **Login node:** `torch-login-a-2` (NYU HPC)
-- **Python env:** `/scratch/cr4206/envs/silent_speech/bin/python` (torch 2.0.1)
+- **Python env:** `/scratch/cr4206/envs/silent_speech/bin/python` (torch 2.0.1; `sentencepiece`
+  installed for the subword unit; `g2p_en` NOT installed — install it or pass a CMUdict for phonemes)
 - **Package not pip-installed** — always set `PYTHONPATH=/scratch/cr4206/sEMG-unpaired-text`
 - **Slurm account:** `torch_pr_39_tandon_advanced`
 - **GPU partitions:** `h100_tandon`, `h200_public`, `a100_tandon`, `l40s_public` — check idle with `sinfo` before submitting
@@ -57,21 +62,44 @@ treats them identically.
 (the parent codebase had them; removed). **Phase 2 note:** phoneme/subword targets are a
 *label-side* change (a new `TextTransform` / tokenizer + CTC vocab), not a signal-side one.
 
-## Ground truth labels (current = characters)
+## Target units — pluggable tokenizer (`semg_jepa/tokenizers.py`)
 
-`text` → `TextTransform.clean_text()`: `unidecode()` → strip punctuation → lowercase → map
-to char indices in `"abcdefghijklmnopqrstuvwxyz0123456789 "` (37 chars). CTC blank = 37,
-vocab = 38. **Phase 2** will add subword and phoneme tokenizers alongside this char one and
-re-train baselines per resolution.
+The CTC target unit is a config knob (`unit: char|subword|phoneme`). A tokenizer is the
+single source of truth for the vocab, blank index, decode rendering, and the WER/CER
+reference rendering, so the rest of the pipeline stays unit-agnostic. The EMG cache stores
+the raw `text` string, so any unit re-encodes on the fly — **no recache per unit**.
+
+- **char** (`CharTokenizer`): `a-z 0-9 space` (37 symbols), blank 37. Phase-1 default.
+  `clean_text` = `unidecode` → strip punctuation → lowercase.
+- **subword** (`SubwordTokenizer`): SentencePiece model trained with
+  `scripts/train_subword.py` (→ `data/tokenizers/subword_<N>.model`). `▁` word-start marker
+  is understood by `pyctcdecode`, so the KenLM word LM still applies for beam decode.
+- **phoneme** (`PhonemeTokenizer`): ARPAbet inventory + `|` word separator. Needs a G2P
+  backend — `g2p_en` (pip) or a CMUdict file via `--phoneme-dict`. No phoneme LM yet, so
+  beam falls back to no-LM; the reported "wer" is a phone error rate.
+
+Build via `build_tokenizer(unit, subword_model=..., phoneme_dict=...)`.
+
+## Token temporal resolution (EMG side)
+
+`GaddyRawEMGEncoder(conv_strides=...)` sets the downsample factor = `prod(conv_strides)`,
+i.e. the encoder output frame rate that the CTC head emits at. This is the knob to **match
+the EMG resolution to the target unit**: characters (many tokens) want the fine 8× rate
+(`[2,2,2]` ≈ 86 Hz, default); coarser subwords/phonemes (fewer tokens) tolerate 16×
+(`[2,2,2,2]`) or want 4× (`[2,2]`). The factor must divide `fixed_raw_len` (1600) and stay
+≤ each utterance's target length; the dataset right-crops raw EMG to a multiple of the
+factor. `train_baseline.py` and `evaluate.py` both take `--unit` and `--conv-strides`.
 
 ## Model architecture (carried from phase 1)
 
-`GaddyRawEMGEncoder` (`semg_jepa/architecture.py`): `[B, 8T, 8] → [B, T, D]` — 3× ResBlock
-Conv1d (stride 2 each = 8× downsample) → Linear → N-layer Transformer with relative
-positional embeddings (window 100). Defaults: model_size=768, num_layers=6, nhead=8,
-dim_feedforward=3072. Random temporal shift augmentation during training (clones input).
+`GaddyRawEMGEncoder` (`semg_jepa/architecture.py`): `[B, F*T, 8] → [B, T, D]` — one ResBlock
+Conv1d per entry of `conv_strides` (default `(2,2,2)` = 8× downsample, F=8) → Linear →
+N-layer Transformer with relative positional embeddings (window 100). Defaults:
+model_size=768, num_layers=6, nhead=8, dim_feedforward=3072. Random temporal shift
+augmentation (≤ F samples) during training. `conv_strides` is the **token-resolution knob**
+(see above); `encoder.downsample_factor` exposes F.
 
-`BaselineCTCModel` = encoder + `CTCHead`.
+`BaselineCTCModel(vocab_size, conv_strides)` = encoder + `CTCHead(vocab_size)`.
 
 `UMLModel` (`uml/model.py`) = dual-branch shared-Transformer model. The other branch's
 frontend (`AudioFrontend` = frozen `facebook/wav2vec2-base` + trainable `Linear(768,
@@ -93,7 +121,8 @@ unigrams). `grid_search(...)` tunes `(beam_width, alpha, beta)` on dev.
 | Python | Slurm | Purpose |
 |---|---|---|
 | `scripts/precompute_raw_emg.py` | `slurm/precompute_raw_emg.slurm` | EMG cache builder (cache already shared via symlink) |
-| `scripts/train_baseline.py` | `slurm/train_baseline.slurm` | Supervised CTC baseline |
+| `scripts/train_subword.py` | — | Train a SentencePiece subword tokenizer (`--unit subword` prerequisite) |
+| `scripts/train_baseline.py` | `slurm/train_baseline.slurm` | Supervised CTC baseline (`--unit`, `--conv-strides`) |
 | `scripts/train_uml.py` | `slurm/train_uml.slurm`, `slurm/train_uml_gaddy_audio.slurm` | Dual-branch shared-transformer UML (audio branch — **template** for the text branch) |
 | `scripts/finetune_from_uml.py` | `slurm/finetune_from_uml.slurm` | CTC finetune from a UML EMG-branch ckpt (encoder + EMG head loaded) |
 | `scripts/finetune_from_jepa.py` | `slurm/finetune_from_jepa.slurm` | CTC finetune from any encoder-only pretrain (head reset) |

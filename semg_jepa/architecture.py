@@ -1,3 +1,4 @@
+import math
 import random
 
 import torch
@@ -29,16 +30,28 @@ class ResBlock(nn.Module):
 
 
 class GaddyRawEMGEncoder(nn.Module):
-    """Raw EMG encoder: raw_emg [B, 8T, 8] -> latent [B, T, D]."""
+    """Raw EMG encoder: raw_emg [B, F*T, 8] -> latent [B, T, D].
 
-    def __init__(self, model_size=768, num_layers=6, dropout=0.2, apply_train_shift=True):
+    ``conv_strides`` sets the **token temporal resolution** (phase-2 knob): the
+    encoder downsamples raw EMG by ``F = prod(conv_strides)`` (one stride-``s``
+    ResBlock per entry). Default ``(2, 2, 2)`` reproduces the phase-1 8× rate
+    (~86 Hz). Coarser units (subwords/phonemes) tolerate a larger factor
+    (e.g. ``(2, 2, 2, 2)`` = 16×, fewer output frames); characters want the
+    finer 8× (or 4× via ``(2, 2)``). ``F`` must stay <= the shortest target's
+    CTC length and must divide the training ``fixed_raw_len``.
+    """
+
+    def __init__(self, model_size=768, num_layers=6, dropout=0.2, apply_train_shift=True,
+                 conv_strides=(2, 2, 2)):
         super().__init__()
         self.apply_train_shift = apply_train_shift
-        self.conv_blocks = nn.Sequential(
-            ResBlock(8, model_size, 2),
-            ResBlock(model_size, model_size, 2),
-            ResBlock(model_size, model_size, 2),
-        )
+        self.conv_strides = tuple(conv_strides)
+        self.downsample_factor = math.prod(self.conv_strides)
+        blocks, in_ch = [], 8
+        for stride in self.conv_strides:
+            blocks.append(ResBlock(in_ch, model_size, stride))
+            in_ch = model_size
+        self.conv_blocks = nn.Sequential(*blocks)
         self.w_raw_in = nn.Linear(model_size, model_size)
         encoder_layer = TransformerEncoderLayer(
             d_model=model_size,
@@ -52,8 +65,8 @@ class GaddyRawEMGEncoder(nn.Module):
 
     def forward(self, raw_emg: torch.Tensor) -> torch.Tensor:
         x_raw = raw_emg
-        if self.training and self.apply_train_shift:
-            shift = random.randrange(8)
+        if self.training and self.apply_train_shift and self.downsample_factor > 1:
+            shift = random.randrange(self.downsample_factor)
             if shift > 0:
                 x_raw = raw_emg.clone()
                 x_raw[:, :-shift, :] = raw_emg[:, shift:, :]
@@ -79,10 +92,18 @@ class CTCHead(nn.Module):
 
 
 class BaselineCTCModel(nn.Module):
-    def __init__(self, model_size=768, num_layers=6, dropout=0.2, vocab_size=37):
+    def __init__(self, model_size=768, num_layers=6, dropout=0.2, vocab_size=37,
+                 conv_strides=(2, 2, 2)):
         super().__init__()
-        self.encoder = GaddyRawEMGEncoder(model_size=model_size, num_layers=num_layers, dropout=dropout)
+        self.encoder = GaddyRawEMGEncoder(
+            model_size=model_size, num_layers=num_layers, dropout=dropout,
+            conv_strides=conv_strides,
+        )
         self.ctc_head = CTCHead(model_size=model_size, vocab_size=vocab_size)
+
+    @property
+    def downsample_factor(self):
+        return self.encoder.downsample_factor
 
     def forward(self, raw_emg):
         return self.ctc_head(self.encoder(raw_emg))

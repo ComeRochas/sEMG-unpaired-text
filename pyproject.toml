@@ -1,7 +1,7 @@
 [project]
-name = "semg-jepa"
-version = "0.1.0"
-description = "sEMG JEPA + CTC training"
+name = "semg-unpaired-text"
+version = "0.2.0"
+description = "sEMG silent-speech CTC — unpaired-text & token-resolution study (phase 2)"
 requires-python = ">=3.10"
 dependencies = [
   "numpy",
@@ -13,7 +13,9 @@ dependencies = [
   "jiwer",
   "Unidecode",
   "tqdm",
-  "ctcdecode"
+  "ctcdecode",
+  "sentencepiece",   # subword unit
+  # "g2p_en",        # optional: phoneme unit (or pass a CMUdict via --phoneme-dict)
 ]
 
 [build-system]

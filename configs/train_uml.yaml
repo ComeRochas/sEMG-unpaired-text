@@ -1,10 +1,10 @@
 # Defaults for scripts/train_uml.py.
 # CLI flags override these; these override script-level defaults.
 
-cache_dir: /scratch/cr4206/sEMGencoderJEPA/data
-librispeech_cache_dir: /scratch/cr4206/sEMGencoderJEPA/data/libri_cache
+cache_dir: /scratch/cr4206/sEMG-unpaired-text/data
+librispeech_cache_dir: /scratch/cr4206/sEMG-unpaired-text/data/libri_cache
 librispeech_split: train-clean-100
-output_directory: /scratch/cr4206/sEMGencoderJEPA/runs/uml
+output_directory: /scratch/cr4206/sEMG-unpaired-text/runs/uml
 
 epochs: 200
 max_batch_len: 88000  # matches baseline: 128000 @ 1000 Hz == ~88000 @ 689 Hz

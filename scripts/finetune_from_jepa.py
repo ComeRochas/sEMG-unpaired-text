@@ -29,9 +29,9 @@ class FinetuneCTCModel(nn.Module):
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--config", default=None, help="Path to YAML config; CLI flags override its values.")
-    p.add_argument("--cache-dir", default="/scratch/cr4206/sEMGencoderJEPA/data")
+    p.add_argument("--cache-dir", default="/scratch/cr4206/sEMG-unpaired-text/data")
     p.add_argument("--pretrained-encoder", default=None)
-    p.add_argument("--output-directory", default="/scratch/cr4206/sEMGencoderJEPA/runs/jepa_finetune")
+    p.add_argument("--output-directory", default="/scratch/cr4206/sEMG-unpaired-text/runs/jepa_finetune")
     p.add_argument("--epochs", type=int, default=80)
     p.add_argument("--max-batch-len", type=int, default=128000)
     p.add_argument("--fixed-raw-len", type=int, default=1600)

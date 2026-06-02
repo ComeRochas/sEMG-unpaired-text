@@ -8,16 +8,16 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 #SBATCH --time=24:00:00
-#SBATCH --output=/scratch/cr4206/sEMGencoderJEPA/logs/train_uml_%j.out
-#SBATCH --error=/scratch/cr4206/sEMGencoderJEPA/logs/train_uml_%j.err
+#SBATCH --output=/scratch/cr4206/sEMG-unpaired-text/logs/train_uml_%j.out
+#SBATCH --error=/scratch/cr4206/sEMG-unpaired-text/logs/train_uml_%j.err
 
 set -euo pipefail
 
 PYTHON=${PYTHON:-/scratch/cr4206/envs/silent_speech/bin/python}
-CACHE_DIR=${CACHE_DIR:-/scratch/cr4206/sEMGencoderJEPA/data}
-LIBRI_CACHE_DIR=${LIBRI_CACHE_DIR:-/scratch/cr4206/sEMGencoderJEPA/data/libri_cache}
+CACHE_DIR=${CACHE_DIR:-/scratch/cr4206/sEMG-unpaired-text/data}
+LIBRI_CACHE_DIR=${LIBRI_CACHE_DIR:-/scratch/cr4206/sEMG-unpaired-text/data/libri_cache}
 LIBRI_SPLIT=${LIBRI_SPLIT:-train-clean-100}
-OUTPUT_DIR=${OUTPUT_DIR:-/scratch/cr4206/sEMGencoderJEPA/runs/uml}
+OUTPUT_DIR=${OUTPUT_DIR:-/scratch/cr4206/sEMG-unpaired-text/runs/uml}
 # Override config knobs from sbatch CLI:
 #   SHARE_CTC_HEAD=1  -> add --share-ctc-head (else use config default)
 #   EPOCH_MODE=both   -> override --epoch-mode (default: config)
@@ -26,14 +26,14 @@ SHARE_CTC_HEAD=${SHARE_CTC_HEAD:-}
 EPOCH_MODE=${EPOCH_MODE:-}
 EXTRA_FLAGS=${EXTRA_FLAGS:-}
 
-cd /scratch/cr4206/sEMGencoderJEPA
-export PYTHONPATH=/scratch/cr4206/sEMGencoderJEPA${PYTHONPATH:+:$PYTHONPATH}
+cd /scratch/cr4206/sEMG-unpaired-text
+export PYTHONPATH=/scratch/cr4206/sEMG-unpaired-text${PYTHONPATH:+:$PYTHONPATH}
 
 # Redirect HuggingFace caches to scratch (wav2vec2-base download).
 export HF_HOME=${HF_HOME:-/scratch/cr4206/.cache/huggingface}
 export TRANSFORMERS_CACHE=${TRANSFORMERS_CACHE:-/scratch/cr4206/.cache/huggingface}
 export TORCH_HOME=${TORCH_HOME:-/scratch/cr4206/.cache/torch}
-mkdir -p "$HF_HOME" "$TORCH_HOME" /scratch/cr4206/sEMGencoderJEPA/logs "$OUTPUT_DIR"
+mkdir -p "$HF_HOME" "$TORCH_HOME" /scratch/cr4206/sEMG-unpaired-text/logs "$OUTPUT_DIR"
 
 # Pre-flight: EMG cache + LibriSpeech cache
 if [ ! -f "${CACHE_DIR}/train.pt" ] || [ ! -f "${CACHE_DIR}/dev.pt" ]; then

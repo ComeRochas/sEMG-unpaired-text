@@ -3,12 +3,12 @@
 # the supervised baseline run — the supposed reference for "post-UML
 # performance on EMG alone".
 
-cache_dir: /scratch/cr4206/sEMGencoderJEPA/data
-output_directory: /scratch/cr4206/sEMGencoderJEPA/runs/finetune_from_uml
+cache_dir: /scratch/cr4206/sEMG-unpaired-text/data
+output_directory: /scratch/cr4206/sEMG-unpaired-text/runs/finetune_from_uml
 
 # Required: path to either an EMG-branch checkpoint (preferred) or a full
 # UMLModel checkpoint. Override at submission time.
-emg_branch: /scratch/cr4206/sEMGencoderJEPA/runs/uml/best_emg_branch.pt
+emg_branch: /scratch/cr4206/sEMG-unpaired-text/runs/uml/best_emg_branch.pt
 uml_full_ckpt: null
 
 epochs: 200

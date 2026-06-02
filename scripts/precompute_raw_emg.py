@@ -137,7 +137,7 @@ def parse_args():
     p.add_argument("--data-config", default=None)
     p.add_argument("--emg-data-dir", default=None)
     p.add_argument("--testset-file", default=None)
-    p.add_argument("--cache-dir", default="/scratch/cr4206/sEMGencoderJEPA/data",
+    p.add_argument("--cache-dir", default="/scratch/cr4206/sEMG-unpaired-text/data",
                    help="Directory where precomputed .pt files will be saved")
     p.add_argument("--num-workers", type=int, default=max(1, (os.cpu_count() or 4) // 2))
     p.add_argument("--remove-channels", nargs="*", default=[])

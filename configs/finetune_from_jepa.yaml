@@ -1,11 +1,11 @@
 # Defaults for scripts/finetune_from_jepa.py.
 # CLI flags override these; these override script-level defaults.
 
-cache_dir: /scratch/cr4206/sEMGencoderJEPA/data
-output_directory: /scratch/cr4206/sEMGencoderJEPA/runs/jepa_finetune
+cache_dir: /scratch/cr4206/sEMG-unpaired-text/data
+output_directory: /scratch/cr4206/sEMG-unpaired-text/runs/jepa_finetune
 
 # pretrained_encoder must be supplied via CLI (no sensible default).
-pretrained_encoder: /scratch/cr4206/sEMGencoderJEPA/runs/jepa_pretrain/pretrained_encoder_20260507_1303.pt
+pretrained_encoder: /scratch/cr4206/sEMG-unpaired-text/runs/jepa_pretrain/pretrained_encoder_20260507_1303.pt
 epochs: 200
 max_batch_len: 88000  # matches baseline (legacy 128000 was in raw 1000 Hz units; this is 689 Hz / 8*T)
 fixed_raw_len: 1600   # matches proven-good baseline (3200 overfits at this dataset size)

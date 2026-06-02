@@ -79,8 +79,8 @@ def build_unigrams(lm_path, out_path, vocab_source=LIBRISPEECH_VOCAB_URL):
 if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser()
-    p.add_argument("--lm-path", default="/scratch/cr4206/sEMGencoderJEPA/data/lm.binary")
-    p.add_argument("--out", default="/scratch/cr4206/sEMGencoderJEPA/data/unigrams.txt")
+    p.add_argument("--lm-path", default="/scratch/cr4206/sEMG-unpaired-text/data/lm.binary")
+    p.add_argument("--out", default="/scratch/cr4206/sEMG-unpaired-text/data/unigrams.txt")
     p.add_argument("--vocab-source", default=LIBRISPEECH_VOCAB_URL)
     args = p.parse_args()
     build_unigrams(args.lm_path, args.out, args.vocab_source)

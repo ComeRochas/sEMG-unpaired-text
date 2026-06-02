@@ -21,7 +21,7 @@ Usage
 -----
     python scripts/precompute_audio_gaddy.py \\
         --emg-data-root /scratch/cr4206/data/emg_data/emg_data \\
-        --out-dir       /scratch/cr4206/sEMGencoderJEPA/data/gaddy_audio_cache \\
+        --out-dir       /scratch/cr4206/sEMG-unpaired-text/data/gaddy_audio_cache \\
         --split-name    gaddy_internal \\
         --num-workers   16
 """
@@ -150,7 +150,7 @@ def parse_args():
     )
     p.add_argument(
         "--out-dir",
-        default="/scratch/cr4206/sEMGencoderJEPA/data/gaddy_audio_cache",
+        default="/scratch/cr4206/sEMG-unpaired-text/data/gaddy_audio_cache",
         help="Output directory; writes <split-name>.pt there.",
     )
     p.add_argument(

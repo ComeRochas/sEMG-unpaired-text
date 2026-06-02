@@ -8,11 +8,14 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+import math
+
 from semg_jepa.architecture import BaselineCTCModel
 from semg_jepa.cached_dataset import CachedRawEMGDataset, build_batches
 from semg_jepa.config_utils import parse_with_config, setup_stdout_logging
 from semg_jepa.ctc_utils import evaluate
 from semg_jepa.data_utils import combine_fixed_length, decollate_tensor
+from semg_jepa.tokenizers import build_tokenizer
 from semg_jepa.wandb_utils import finish_wandb, init_wandb, wandb_log
 
 
@@ -24,16 +27,29 @@ def _sync(device):
 def train(args):
     run = init_wandb(args, default_name_prefix="baseline")
 
-    trainset = CachedRawEMGDataset(args.cache_dir, "train")
-    devset = CachedRawEMGDataset(args.cache_dir, "dev")
-    n_chars = len(devset.text_transform.chars)
+    conv_strides = tuple(args.conv_strides)
+    factor = math.prod(conv_strides)
+    assert args.fixed_raw_len % factor == 0, (
+        f"fixed_raw_len={args.fixed_raw_len} must be divisible by downsample factor {factor} "
+        f"(conv_strides={conv_strides})")
+
+    tokenizer = build_tokenizer(
+        args.unit, subword_model=args.subword_model, phoneme_dict=args.phoneme_dict,
+    )
+    logging.info("unit=%s vocab_size=%d blank=%d conv_strides=%s downsample_factor=%d",
+                 args.unit, tokenizer.vocab_size, tokenizer.blank_index, conv_strides, factor)
+
+    trainset = CachedRawEMGDataset(args.cache_dir, "train", tokenizer=tokenizer, downsample_factor=factor)
+    devset = CachedRawEMGDataset(args.cache_dir, "dev", tokenizer=tokenizer, downsample_factor=factor)
+    blank_id = tokenizer.blank_index
 
     device = "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
     model = BaselineCTCModel(
         model_size=args.model_size,
         num_layers=args.num_layers,
         dropout=args.dropout,
-        vocab_size=n_chars,
+        vocab_size=tokenizer.vocab_size,
+        conv_strides=conv_strides,
     ).to(device)
 
     if args.start_training_from:
@@ -83,7 +99,7 @@ def train(args):
             pred = F.log_softmax(model(raw), dim=-1)
             pred = nn.utils.rnn.pad_sequence(decollate_tensor(pred, example["lengths"]), batch_first=False)
             targets = nn.utils.rnn.pad_sequence(example["text_int"], batch_first=True).to(device)
-            loss = F.ctc_loss(pred, targets, example["lengths"], example["text_int_lengths"], blank=n_chars)
+            loss = F.ctc_loss(pred, targets, example["lengths"], example["text_int_lengths"], blank=blank_id)
             _sync(device)
             t["fwd"] += time.perf_counter() - t1
 
@@ -144,8 +160,8 @@ def train(args):
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--config", default=None, help="Path to YAML config; CLI flags override its values.")
-    p.add_argument("--cache-dir", default="/scratch/cr4206/sEMGencoderJEPA/data")
-    p.add_argument("--output-directory", default="/scratch/cr4206/sEMGencoderJEPA/runs/baseline")
+    p.add_argument("--cache-dir", default="/scratch/cr4206/sEMG-unpaired-text/data")
+    p.add_argument("--output-directory", default="/scratch/cr4206/sEMG-unpaired-text/runs/baseline")
     p.add_argument("--epochs", type=int, default=200)
     p.add_argument("--max-batch-len", type=int, default=128000)
     p.add_argument("--fixed-raw-len", type=int, default=1600)
@@ -160,6 +176,16 @@ def parse_args():
     p.add_argument("--model-size", type=int, default=768)
     p.add_argument("--num-layers", type=int, default=6)
     p.add_argument("--dropout", type=float, default=0.2)
+    # Phase-2 knobs: target unit and EMG token temporal resolution.
+    p.add_argument("--unit", choices=["char", "subword", "phoneme"], default="char",
+                   help="CTC target unit. Retrain a baseline per unit.")
+    p.add_argument("--subword-model", default=None,
+                   help="Path to a SentencePiece .model (required for --unit subword).")
+    p.add_argument("--phoneme-dict", default=None,
+                   help="CMUdict-style file for --unit phoneme (else uses g2p_en if installed).")
+    p.add_argument("--conv-strides", type=int, nargs="+", default=[2, 2, 2],
+                   help="Per-ResBlock strides; downsample factor = product "
+                        "(default 8x ~86Hz; e.g. 2 2 = 4x, 2 2 2 2 = 16x).")
     p.add_argument("--start-training-from", default=None)
     p.add_argument("--eval-method", choices=["greedy", "beam"], default="greedy")
     p.add_argument("--wandb", action="store_true")

@@ -8,24 +8,24 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 #SBATCH --time=24:00:00
-#SBATCH --output=/scratch/cr4206/sEMGencoderJEPA/logs/finetune_from_uml_%j.out
-#SBATCH --error=/scratch/cr4206/sEMGencoderJEPA/logs/finetune_from_uml_%j.err
+#SBATCH --output=/scratch/cr4206/sEMG-unpaired-text/logs/finetune_from_uml_%j.out
+#SBATCH --error=/scratch/cr4206/sEMG-unpaired-text/logs/finetune_from_uml_%j.err
 
 set -euo pipefail
 
 PYTHON=${PYTHON:-/scratch/cr4206/envs/silent_speech/bin/python}
-CACHE_DIR=${CACHE_DIR:-/scratch/cr4206/sEMGencoderJEPA/data}
-OUTPUT_DIR=${OUTPUT_DIR:-/scratch/cr4206/sEMGencoderJEPA/runs/finetune_from_uml}
+CACHE_DIR=${CACHE_DIR:-/scratch/cr4206/sEMG-unpaired-text/data}
+OUTPUT_DIR=${OUTPUT_DIR:-/scratch/cr4206/sEMG-unpaired-text/runs/finetune_from_uml}
 
 # Either point at a *_emg_branch.pt (preferred) or a full UMLModel state dict.
-EMG_BRANCH=${EMG_BRANCH:-/scratch/cr4206/sEMGencoderJEPA/runs/uml/best_emg_branch.pt}
+EMG_BRANCH=${EMG_BRANCH:-/scratch/cr4206/sEMG-unpaired-text/runs/uml/best_emg_branch.pt}
 UML_FULL_CKPT=${UML_FULL_CKPT:-}
 EXTRA_FLAGS=${EXTRA_FLAGS:-}
 
-cd /scratch/cr4206/sEMGencoderJEPA
-export PYTHONPATH=/scratch/cr4206/sEMGencoderJEPA${PYTHONPATH:+:$PYTHONPATH}
+cd /scratch/cr4206/sEMG-unpaired-text
+export PYTHONPATH=/scratch/cr4206/sEMG-unpaired-text${PYTHONPATH:+:$PYTHONPATH}
 
-mkdir -p /scratch/cr4206/sEMGencoderJEPA/logs "$OUTPUT_DIR"
+mkdir -p /scratch/cr4206/sEMG-unpaired-text/logs "$OUTPUT_DIR"
 
 CKPT_FLAG=""
 if [ -n "$EMG_BRANCH" ] && [ -f "$EMG_BRANCH" ]; then

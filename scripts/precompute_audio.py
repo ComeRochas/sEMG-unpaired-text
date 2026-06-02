@@ -24,7 +24,7 @@ Usage
 -----
     python scripts/precompute_audio.py \\
         --librispeech-dir /scratch/cr4206/data/librispeech \\
-        --out-dir         /scratch/cr4206/sEMGencoderJEPA/data/libri_cache \\
+        --out-dir         /scratch/cr4206/sEMG-unpaired-text/data/libri_cache \\
         --splits          train-clean-100 \\
         --num-workers     16
 """
