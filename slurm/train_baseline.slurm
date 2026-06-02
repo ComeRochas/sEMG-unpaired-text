@@ -42,7 +42,7 @@ EXTRA_ARGS=()
   --unit "$UNIT" \
   --conv-strides $CONV_STRIDES \
   "${EXTRA_ARGS[@]}" \
-  --wandb \
-  --epochs 400 --lr-decay-milestones 250 300 350
+  --wandb
+# epochs / lr_decay_milestones / lr_decay_gamma now come from configs/train_baseline.yaml
 
 echo "[train_baseline] finished at=$(date -Is)"

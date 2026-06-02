@@ -4,13 +4,15 @@
 cache_dir: data        # symlink to the shared EMG cache
 output_directory: runs/baseline_char_8x
 
-epochs: 400
+epochs: 200
 max_batch_len: 88000  # matches Gaddy: 128000 @ 1000 Hz == ~88000 @ 689 Hz (8*T units)
 fixed_raw_len: 1600   # 3200 produces faster training but overfits — verified by ablation runs 8103516 vs 8297845
                       # must be divisible by the downsample factor = prod(conv_strides)
 
 learning_rate: 3.0e-4
 learning_rate_warmup: 1000
+lr_decay_milestones: [125, 150, 175]   # epochs at which LR *= lr_decay_gamma (phase-1 schedule)
+lr_decay_gamma: 0.5
 l2: 0.0
 grad_accum_steps: 2
 clip_grad_norm: 0.0   # disabled: at 10.0 it never fires for this model; old baseline used no clip
