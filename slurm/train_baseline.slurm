@@ -21,7 +21,9 @@ CACHE_DIR=${CACHE_DIR:-/scratch/cr4206/sEMG-unpaired-text/data}
 #                CONV_STRIDES="2 2 2 2" OUTPUT_DIR=runs/baseline_subword_16x sbatch slurm/train_baseline.slurm
 UNIT=${UNIT:-char}
 CONV_STRIDES=${CONV_STRIDES:-2 2 2}
+DOWNSAMPLE_FACTOR=${DOWNSAMPLE_FACTOR:-}   # e.g. 25; if set, overrides CONV_STRIDES
 SUBWORD_MODEL=${SUBWORD_MODEL:-}
+PHONEME_DICT=${PHONEME_DICT:-}             # CMUdict for unit=phoneme
 OUTPUT_DIR=${OUTPUT_DIR:-/scratch/cr4206/sEMG-unpaired-text/runs/baseline_${UNIT}}
 
 cd /scratch/cr4206/sEMG-unpaired-text
@@ -30,17 +32,25 @@ export PYTHONPATH=/scratch/cr4206/sEMG-unpaired-text${PYTHONPATH:+:$PYTHONPATH}
 mkdir -p /scratch/cr4206/sEMG-unpaired-text/logs "$OUTPUT_DIR"
 
 echo "[train_baseline] job=${SLURM_JOB_ID:-manual} host=$(hostname) start=$(date -Is)"
-echo "[train_baseline] cache_dir=$CACHE_DIR output_dir=$OUTPUT_DIR unit=$UNIT conv_strides=$CONV_STRIDES"
+echo "[train_baseline] cache_dir=$CACHE_DIR output_dir=$OUTPUT_DIR unit=$UNIT conv_strides=$CONV_STRIDES downsample_factor=${DOWNSAMPLE_FACTOR:-(from strides)}"
 
 EXTRA_ARGS=()
 [ -n "$SUBWORD_MODEL" ] && EXTRA_ARGS+=(--subword-model "$SUBWORD_MODEL")
+[ -n "$PHONEME_DICT" ] && EXTRA_ARGS+=(--phoneme-dict "$PHONEME_DICT")
+
+# Resolution: prefer DOWNSAMPLE_FACTOR (e.g. 25) if set, else CONV_STRIDES (e.g. "2 2 2").
+if [ -n "$DOWNSAMPLE_FACTOR" ]; then
+  RES_ARGS=(--downsample-factor "$DOWNSAMPLE_FACTOR")
+else
+  RES_ARGS=(--conv-strides $CONV_STRIDES)
+fi
 
 "$PYTHON" -u scripts/train_baseline.py \
   --config configs/train_baseline.yaml \
   --cache-dir "$CACHE_DIR" \
   --output-directory "$OUTPUT_DIR" \
   --unit "$UNIT" \
-  --conv-strides $CONV_STRIDES \
+  "${RES_ARGS[@]}" \
   "${EXTRA_ARGS[@]}" \
   --wandb
 # epochs / lr_decay_milestones / lr_decay_gamma now come from configs/train_baseline.yaml

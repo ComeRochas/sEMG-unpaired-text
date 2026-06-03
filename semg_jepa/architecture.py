@@ -7,11 +7,46 @@ from torch import nn
 
 from .transformer import TransformerEncoderLayer
 
+FIXED_RAW_LEN = 1600  # training reshape length; the downsample factor must divide it.
+
+
+def factor_to_strides(factor: int, fixed_raw_len: int = FIXED_RAW_LEN) -> tuple:
+    """Decompose a downsample ``factor`` into per-ResBlock conv strides.
+
+    ``factor`` must divide ``fixed_raw_len`` (= 2^6 * 5^2), i.e. be of the form
+    ``2^a * 5^b``. Returns strides as 2s then 5s (largest stride **last**), e.g.
+    ``20 -> (2, 2, 5)``, ``25 -> (5, 5)``, ``8 -> (2, 2, 2)``. The encoder's
+    downsample factor is ``prod(strides) == factor``; the dataset right-crops raw
+    EMG to a multiple of it. Standardizing the decomposition keeps run naming and
+    the stride-5 kernel choice (see ``ResBlock``) consistent across the sweep.
+    """
+    if factor < 1 or fixed_raw_len % factor != 0:
+        raise ValueError(
+            f"downsample factor {factor} must divide fixed_raw_len={fixed_raw_len}")
+    f, twos, fives = factor, 0, 0
+    while f % 2 == 0:
+        f //= 2
+        twos += 1
+    while f % 5 == 0:
+        f //= 5
+        fives += 1
+    if f != 1:
+        raise ValueError(
+            f"downsample factor {factor} must be 2^a*5^b to divide {fixed_raw_len}")
+    return tuple([2] * twos + [5] * fives)
+
 
 class ResBlock(nn.Module):
     def __init__(self, num_ins, num_outs, stride=1):
         super().__init__()
-        self.conv1 = nn.Conv1d(num_ins, num_outs, 3, padding=1, stride=stride)
+        # Keep kernel 3 for the proven stride<=3 stack; widen to an odd kernel >= stride
+        # for stride>3 (the stride-5 layers that non-power-of-2 factors use) so no input
+        # samples are skipped. padding=(kernel-1)/2 preserves the exact L/stride length.
+        if stride > 3:
+            kernel, pad = 2 * stride - 1, stride - 1
+        else:
+            kernel, pad = 3, 1
+        self.conv1 = nn.Conv1d(num_ins, num_outs, kernel, padding=pad, stride=stride)
         self.bn1 = nn.BatchNorm1d(num_outs)
         self.conv2 = nn.Conv1d(num_outs, num_outs, 3, padding=1)
         self.bn2 = nn.BatchNorm1d(num_outs)

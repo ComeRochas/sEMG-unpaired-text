@@ -10,7 +10,7 @@ from torch import nn
 
 import math
 
-from semg_jepa.architecture import BaselineCTCModel
+from semg_jepa.architecture import BaselineCTCModel, factor_to_strides
 from semg_jepa.cached_dataset import CachedRawEMGDataset, build_batches
 from semg_jepa.config_utils import parse_with_config, setup_stdout_logging
 from semg_jepa.ctc_utils import evaluate
@@ -27,7 +27,11 @@ def _sync(device):
 def train(args):
     run = init_wandb(args, default_name_prefix="baseline")
 
-    conv_strides = tuple(args.conv_strides)
+    # --downsample-factor (e.g. 25) takes precedence over --conv-strides (e.g. 2 2 2).
+    if getattr(args, "downsample_factor", None):
+        conv_strides = factor_to_strides(args.downsample_factor)
+    else:
+        conv_strides = tuple(args.conv_strides)
     factor = math.prod(conv_strides)
     assert args.fixed_raw_len % factor == 0, (
         f"fixed_raw_len={args.fixed_raw_len} must be divisible by downsample factor {factor} "
@@ -186,6 +190,10 @@ def parse_args():
     p.add_argument("--conv-strides", type=int, nargs="+", default=[2, 2, 2],
                    help="Per-ResBlock strides; downsample factor = product "
                         "(default 8x ~86Hz; e.g. 2 2 = 4x, 2 2 2 2 = 16x).")
+    p.add_argument("--downsample-factor", type=int, default=None,
+                   help="EMG token downsample factor (alternative to --conv-strides; "
+                        "must divide fixed_raw_len=1600, i.e. be 2^a*5^b). "
+                        "E.g. 25 -> strides (5,5), 20 -> (2,2,5). Takes precedence.")
     p.add_argument("--start-training-from", default=None)
     p.add_argument("--eval-method", choices=["greedy", "beam"], default="greedy")
     p.add_argument("--wandb", action="store_true")

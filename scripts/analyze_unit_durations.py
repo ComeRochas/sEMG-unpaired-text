@@ -32,6 +32,7 @@ import os
 import numpy as np
 import torch
 
+from semg_jepa.architecture import factor_to_strides
 from semg_jepa.tokenizers import build_tokenizer
 
 SAMPLE_RATE = 689.06  # Hz, the stored raw_emg rate (read_emg.subsample target)
@@ -88,16 +89,19 @@ def main():
           f"p5={pct(per_unit_ms,5):.1f} min={per_unit_ms.min():.1f}  "
           f"(min = densest utterance = the CTC hard floor)")
 
-    print(f"\n  F   strides        frame_period   frames/token(median)  feasible(all frames>=tokens)")
+    print(f"\n  F   strides        frame_period   frames/token(med/mean/min)   feasible(all>=tokens)")
     for f in args.factors:
         frames = np.floor(raw_lens / f)
         ratio = frames / n_tokens
         feasible = float((frames >= n_tokens).mean())
         period_ms = 1000.0 * f / SAMPLE_RATE
-        strides = "x".join(["2"] * int(round(np.log2(f)))) if (f & (f - 1)) == 0 else str(f)
+        try:
+            strides = "x".join(str(s) for s in factor_to_strides(f))  # same decomp training uses
+        except ValueError:
+            strides = "n/a"  # f does not divide fixed_raw_len=1600
         flag = "  <-- char-8x default" if f == 8 else ""
         print(f"  {f:<3d} ({strides:<9}) {period_ms:6.1f} ms     "
-              f"median={np.median(ratio):5.2f}  min={ratio.min():4.2f}   "
+              f"med={np.median(ratio):5.2f} mean={ratio.mean():5.2f} min={ratio.min():4.2f}   "
               f"{100*feasible:5.1f}%{flag}")
     print()
 

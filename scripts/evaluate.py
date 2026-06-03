@@ -3,7 +3,7 @@ import math
 
 import torch
 
-from semg_jepa.architecture import BaselineCTCModel
+from semg_jepa.architecture import BaselineCTCModel, factor_to_strides
 from semg_jepa.cached_dataset import CachedRawEMGDataset
 from semg_jepa.ctc_utils import evaluate, grid_search
 from semg_jepa.tokenizers import build_tokenizer
@@ -32,6 +32,8 @@ def parse_args():
     p.add_argument("--subword-model", default=None)
     p.add_argument("--phoneme-dict", default=None)
     p.add_argument("--conv-strides", type=int, nargs="+", default=[2, 2, 2])
+    p.add_argument("--downsample-factor", type=int, default=None,
+                   help="Alt to --conv-strides; must match training (e.g. 25 -> (5,5)).")
     p.add_argument("--cpu", action="store_true")
     return p.parse_args()
 
@@ -39,7 +41,11 @@ def parse_args():
 def main(args):
     device = "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
 
-    conv_strides = tuple(args.conv_strides)
+    # --downsample-factor (e.g. 25) takes precedence over --conv-strides; must match training.
+    if getattr(args, "downsample_factor", None):
+        conv_strides = factor_to_strides(args.downsample_factor)
+    else:
+        conv_strides = tuple(args.conv_strides)
     factor = math.prod(conv_strides)
     tokenizer = build_tokenizer(args.unit, subword_model=args.subword_model,
                                 phoneme_dict=args.phoneme_dict)
