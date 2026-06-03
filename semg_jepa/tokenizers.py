@@ -183,6 +183,11 @@ class PhonemeTokenizer(BaseTokenizer):
                     continue
                 word, *phones = line.split()
                 word = word.split("(")[0].lower()  # drop CMUdict (1)/(2) variants
+                # nltk's cmudict data file inserts a variant index as a 2nd column
+                # (e.g. "A 1 AH0"); skip a leading all-digit token so both the
+                # classic "WORD  PH ..." and nltk "WORD N PH ..." formats parse.
+                if phones and phones[0].isdigit():
+                    phones = phones[1:]
                 phones = [p.rstrip("012").lower() for p in phones]
                 d.setdefault(word, phones)
         return d
