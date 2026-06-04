@@ -47,6 +47,15 @@ def train(args):
     devset = CachedRawEMGDataset(args.cache_dir, "dev", tokenizer=tokenizer, downsample_factor=factor)
     blank_id = tokenizer.blank_index
 
+    # Units without a word LM (phoneme) must not beam-decode for the dev metric:
+    # pyctcdecode renders the labels glued together (no spaces), which mismatches the
+    # space-joined reference and inflates WER to ~1.0. Greedy renders via int_to_text and
+    # gives a meaningful (phone) error rate, so best.pt is selected correctly.
+    eval_method = args.eval_method if tokenizer.supports_word_lm else "greedy"
+    if eval_method != args.eval_method:
+        logging.info("eval_method forced to 'greedy' (unit=%s has no word LM; beam mis-renders)",
+                     args.unit)
+
     device = "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
     model = BaselineCTCModel(
         model_size=args.model_size,
@@ -130,7 +139,7 @@ def train(args):
         train_loss = float(np.mean(losses)) if losses else 0.0
 
         eval_start = time.perf_counter()
-        wer, cer = evaluate(model, devset, device, method=args.eval_method)
+        wer, cer = evaluate(model, devset, device, method=eval_method)
         t_eval = time.perf_counter() - eval_start
 
         lr_sched.step()
