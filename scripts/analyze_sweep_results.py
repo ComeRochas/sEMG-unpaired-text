@@ -98,8 +98,10 @@ def refs_and_preds(model, dataset, device, method, beam_kw):
         preds = [dataset.tokenizer.int_to_text(_greedy_collapse(lp.argmax(-1).tolist(), blank))
                  for lp in lps]
     else:
-        decoder = build_decoder(dataset.tokenizer, **beam_kw)
-        preds = _decode_beam(lps, decoder, beam_kw.get("beam_width", 200))
+        bw = beam_kw["beam_width"]
+        dec_kw = {k: v for k, v in beam_kw.items() if k != "beam_width"}  # build_decoder has no beam_width
+        decoder = build_decoder(dataset.tokenizer, **dec_kw)
+        preds = _decode_beam(lps, decoder, bw)
     return refs, preds
 
 

@@ -6,8 +6,8 @@
 #
 #SBATCH --job-name=analyze_sweep
 #SBATCH --account=torch_pr_39_tandon_advanced
-#SBATCH --partition=h100_tandon
-#SBATCH --gres=gpu:h100:1
+#SBATCH --partition=l40s_public
+#SBATCH --gres=gpu:l40s:1
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
