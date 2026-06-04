@@ -168,7 +168,18 @@ def evaluate(model, dataset, device, method="greedy", batch_size=None,
         decoder = build_decoder(dataset.tokenizer,
                                 lm_path=lm_path, unigrams_path=unigrams_path,
                                 alpha=alpha, beta=beta)
-        predictions = _decode_beam(log_probs_list, decoder, beam_width, num_workers)
+        try:
+            predictions = _decode_beam(log_probs_list, decoder, beam_width, num_workers)
+        except ValueError:
+            # pyctcdecode raises "max() arg is an empty sequence" when its pruning leaves
+            # no beams — happens on near-uniform logits (untrained model early in training,
+            # especially at high downsample factors with few frames). Fall back to greedy
+            # for this eval so training doesn't crash.
+            blank_id = dataset.tokenizer.blank_index
+            predictions = [
+                dataset.tokenizer.int_to_text(_greedy_collapse(lp.argmax(-1).tolist(), blank_id))
+                for lp in log_probs_list
+            ]
 
     return compute_wer(references, predictions), compute_cer(references, predictions)
 
