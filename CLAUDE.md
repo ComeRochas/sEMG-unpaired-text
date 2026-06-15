@@ -20,13 +20,12 @@ transfer at full labels. (Full phase-1 results: see the archived repo's `TODO.md
 ### Phase 2 direction (this repo)
 
 Priority order (see [TODO.md](TODO.md)):
-1. **Target unit × token resolution** (implemented, in progress): predict **characters /
-   subwords / phonemes**, and **tune the EMG token temporal resolution** to match the
-   chosen unit. Re-train a supervised baseline per (unit, resolution). *This is the current
-   focus and is wired into `train_baseline.py`.*
-2. **Text as the unpaired modality** (next): add a text branch to the shared transformer
-   (mirroring the kept audio branch), comparing a large generic corpus vs the Gaddy
-   transcripts.
+1. **Target unit × token resolution** (DONE): swept char/subword/phoneme × resolution.
+   **Result: predict CHARACTERS at 16×** (`--unit char --downsample-factor 16`). Coarser than
+   the phase-1 8× wins; subwords don't robustly beat char; phonemes dropped. See [TODO.md](TODO.md) §B.
+2. **Text as the unpaired modality** (CURRENT NEXT): add a text branch to the shared transformer
+   (mirroring the kept audio branch), at char-16×, comparing a large generic corpus vs the Gaddy
+   transcripts. See [TODO.md](TODO.md) §C.
 3. **Supervised then unsupervised** settings.
 
 (A Conformer encoder was considered and **deferred** — not in scope now.)
@@ -35,7 +34,8 @@ Priority order (see [TODO.md](TODO.md)):
 
 - **Login node:** `torch-login-a-2` (NYU HPC)
 - **Python env:** `/scratch/cr4206/envs/silent_speech/bin/python` (torch 2.0.1; `sentencepiece`
-  installed for the subword unit; `g2p_en` NOT installed — install it or pass a CMUdict for phonemes)
+  installed for the subword unit; `g2p_en` installed for phonemes, and a complete OOV-covering
+  pronunciation dict is precomputed at `data/tokenizers/phoneme_g2p.dict`)
 - **Package not pip-installed** — always set `PYTHONPATH=/scratch/cr4206/sEMG-unpaired-text`
 - **Slurm account:** `torch_pr_39_tandon_advanced`
 - **GPU partitions:** `h100_tandon`, `h200_public`, `a100_tandon`, `l40s_public` — check idle with `sinfo` before submitting
@@ -75,8 +75,13 @@ the raw `text` string, so any unit re-encodes on the fly — **no recache per un
   `scripts/train_subword.py` (→ `data/tokenizers/subword_<N>.model`). `▁` word-start marker
   is understood by `pyctcdecode`, so the KenLM word LM still applies for beam decode.
 - **phoneme** (`PhonemeTokenizer`): ARPAbet inventory + `|` word separator. Needs a G2P
-  backend — `g2p_en` (pip) or a CMUdict file via `--phoneme-dict`. No phoneme LM yet, so
-  beam falls back to no-LM; the reported "wer" is a phone error rate.
+  backend — `g2p_en` (pip) or a CMUdict file via `--phoneme-dict` (use the precomputed
+  `data/tokenizers/phoneme_g2p.dict`). No phoneme LM, so the reported metric is a phone error
+  rate (PER). **Score phonemes with greedy, not beam** — pyctcdecode glues phones with no
+  spaces and mis-renders them (WER≈1.0); `train_baseline.py` auto-forces greedy when the unit
+  has no word LM, so phoneme `best.pt` is selected correctly (pre-fix runs: use `last.pt`).
+  To get a comparable *word* WER, `scripts/phoneme_to_words.py` decodes phones→words via the
+  inverted lexicon + KenLM.
 
 Build via `build_tokenizer(unit, subword_model=..., phoneme_dict=...)`.
 
@@ -88,7 +93,17 @@ the EMG resolution to the target unit**: characters (many tokens) want the fine 
 (`[2,2,2]` ≈ 86 Hz, default); coarser subwords/phonemes (fewer tokens) tolerate 16×
 (`[2,2,2,2]`) or want 4× (`[2,2]`). The factor must divide `fixed_raw_len` (1600) and stay
 ≤ each utterance's target length; the dataset right-crops raw EMG to a multiple of the
-factor. `train_baseline.py` and `evaluate.py` both take `--unit` and `--conv-strides`.
+factor. `train_baseline.py` and `evaluate.py` both take `--unit` and `--conv-strides`, plus
+`--downsample-factor N` (alt to `--conv-strides`; `factor_to_strides()` decomposes any divisor
+of `fixed_raw_len=1600 = 2^a·5^b` — 8,10,16,20,25,32,40,50 — into strides, widening the kernel
+for stride>3 so non-power-of-2 factors don't skip samples).
+
+**Finding (test): coarser than phase-1 8× is better → DECISION: predict CHARACTERS at 16×**
+(`--unit char --downsample-factor 16`). char improves 8×(0.315)→16×(0.296)→20×(0.292); the EMG
+optimum ~16–20× tracks the **signal's information rate, not the unit length** (speech-ASR's
+20–40 ms band). Subwords (60–1000) don't robustly beat char; **phonemes dropped** (apples-to-
+apples, same flashlight lexicon decoder: char-16× 0.248 < phoneme 0.275). ⚠️ all beam WERs are
+LM-leakage-inflated (test = War-of-the-Worlds ∈ LibriSpeech LM). See [TODO.md](TODO.md) §B.
 
 ## Model architecture (carried from phase 1)
 
@@ -122,7 +137,11 @@ unigrams). `grid_search(...)` tunes `(beam_width, alpha, beta)` on dev.
 |---|---|---|
 | `scripts/precompute_raw_emg.py` | `slurm/precompute_raw_emg.slurm` | EMG cache builder (cache already shared via symlink) |
 | `scripts/train_subword.py` | — | Train a SentencePiece subword tokenizer (`--unit subword` prerequisite) |
-| `scripts/train_baseline.py` | `slurm/train_baseline.slurm` | Supervised CTC baseline (`--unit`, `--conv-strides`) |
+| `scripts/train_baseline.py` | `slurm/train_baseline.slurm`, `slurm/sweep_unit.slurm` | Supervised CTC baseline (`--unit`, `--conv-strides`/`--downsample-factor`); sweep = one job per factor |
+| `scripts/analyze_unit_durations.py` | — | Per-unit duration vs EMG token period per factor (CTC feasibility) — pick the resolution |
+| `scripts/build_phoneme_dict.py` | — | Precompute a complete g2p pronunciation dict (OOV-covering) → `data/tokenizers/phoneme_g2p.dict` |
+| `scripts/analyze_sweep_results.py` | `slurm/analyze_sweep.slurm` | Test-set WER/CER table + reconstructions across `runs/baseline_*` |
+| `scripts/phoneme_to_words.py` | `slurm/phoneme_to_words.slurm` | Decode a phoneme ckpt → words (lexicon + KenLM) → real word WER |
 | `scripts/train_uml.py` | `slurm/train_uml.slurm`, `slurm/train_uml_gaddy_audio.slurm` | Dual-branch shared-transformer UML (audio branch — **template** for the text branch) |
 | `scripts/finetune_from_uml.py` | `slurm/finetune_from_uml.slurm` | CTC finetune from a UML EMG-branch ckpt (encoder + EMG head loaded) |
 | `scripts/finetune_from_jepa.py` | `slurm/finetune_from_jepa.slurm` | CTC finetune from any encoder-only pretrain (head reset) |
@@ -144,3 +163,17 @@ Entity `UMLforVideoLab`, project `JEPAforsEMG`.
 - **build_batches per epoch** for reshuffled size-aware batches.
 - **Batched evaluation** (~16× faster than batch_size=1).
 - **In-place mutation fix** in `GaddyRawEMGEncoder` (clones before temporal shift).
+- never watch or launch loops to monitor slurm job states (squeue, sacct, ...) otherwise my account will be banned from HPC clusters
+
+## Phase-2 gotchas (learned this round)
+
+- **LR schedule + epochs live in `configs/train_baseline.yaml`** (200 ep, milestones
+  `[125,150,175]`, γ=0.5); the slurm no longer hard-overrides them.
+- **Phoneme metric:** beam mis-renders phonemes (pyctcdecode glues phones → WER≈1.0) → always
+  score phonemes **greedy** (auto for no-word-LM units in `train_baseline.py`); pre-fix phoneme
+  runs have a mis-selected `best.pt` → use `last.pt`.
+- **Phoneme 8× collapses** to all-blank (too fine, ~8.8 frames/phoneme → blank-dominated
+  alignment); a CTC optimization instability, *not* a bug. 10×/16× train fine (PER ~0.17).
+- **Beam dev-eval** in `evaluate()` falls back to greedy if pyctcdecode returns no beams
+  (near-uniform logits on an untrained model at a high factor, e.g. char-25× epoch 1).
+- **Phoneme→words** (`scripts/phoneme_to_words.py`) is the active next thread — see [TODO.md](TODO.md) §B.

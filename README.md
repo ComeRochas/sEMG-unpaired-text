@@ -31,22 +31,30 @@ The CTC **unit** (`char`/`subword`/`phoneme`) and the EMG **token resolution**
 and `evaluate.py`. The EMG cache stores raw `text`, so units re-encode on the fly (no
 recache). See [CLAUDE.md](CLAUDE.md) for the design.
 
+**Result (test):** token resolution matters and *coarser than the phase-1 8× wins* — char
+improves 8×(0.315)→16×(0.296)→20×(0.292), optimum ~16–20× (≈23 ms/frame). **Decision: predict
+characters at 16×** (`--unit char --downsample-factor 16`). Subwords (60–1000) don't robustly
+beat char; **phonemes dropped** (char-16× 0.248 < phoneme 0.275 under the same lexicon decoder).
+⚠️ beam WERs are LM-leakage-inflated (the test text is in the LibriSpeech LM). See [TODO.md](TODO.md).
+
 ```bash
-# Character baseline at 8x (default ~86 Hz)
-UNIT=char CONV_STRIDES="2 2 2" OUTPUT_DIR=runs/baseline_char_8x sbatch slurm/train_baseline.slurm
-
-# Subword baseline: first train a SentencePiece model, then train at a coarser 16x rate
+# Sweep a unit's token resolution: one training run per factor, in one slurm allocation.
+# Factors must divide 1600 (2^a*5^b): 8, 10, 16, 20, 25, 32, 40, 50.
+UNIT=char FACTORS="8 10 16 20 25" sbatch slurm/sweep_unit.slurm
 python scripts/train_subword.py --vocab-size 500     # -> data/tokenizers/subword_500.model
-UNIT=subword SUBWORD_MODEL=data/tokenizers/subword_500.model \
-  CONV_STRIDES="2 2 2 2" OUTPUT_DIR=runs/baseline_subword_16x sbatch slurm/train_baseline.slurm
+UNIT=subword SUBWORD_MODEL=data/tokenizers/subword_500.model FACTORS="16 20 25 32" sbatch slurm/sweep_unit.slurm
+UNIT=phoneme PHONEME_DICT=data/tokenizers/phoneme_g2p.dict FACTORS="10 16" sbatch slurm/sweep_unit.slurm
+# single run: UNIT=... DOWNSAMPLE_FACTOR=25 OUTPUT_DIR=runs/... sbatch slurm/train_baseline.slurm
 
-# Phoneme baseline (needs a G2P backend: `pip install g2p_en` or --phoneme-dict cmudict.txt)
-UNIT=phoneme CONV_STRIDES="2 2 2" OUTPUT_DIR=runs/baseline_phoneme_8x sbatch slurm/train_baseline.slurm
+# Summarise every run on test (WER for char/subword, PER for phoneme) + reconstructions
+sbatch slurm/analyze_sweep.slurm                     # -> runs/sweep_summary_test.md
 
-# Evaluate (pass the SAME unit/strides the checkpoint was trained with)
-UNIT=subword SUBWORD_MODEL=data/tokenizers/subword_500.model CONV_STRIDES="2 2 2 2" \
-  CHECKPOINTS=runs/baseline_subword_16x/best.pt sbatch slurm/evaluate.slurm
+# Phoneme -> words (pronunciation lexicon + KenLM) for a comparable word WER
+CKPT=runs/baseline_phoneme_10x/last.pt FACTOR=10 sbatch slurm/phoneme_to_words.slurm
 ```
+
+> Token resolution is also pickable directly as `--downsample-factor N` (alt to
+> `--conv-strides`); pick it per unit with `scripts/analyze_unit_durations.py`.
 
 > Requires `sentencepiece` (installed in the env) for the subword unit.
 
@@ -82,8 +90,12 @@ CHECKPOINTS="runs/baseline/best.pt" GRID_SEARCH=1 sbatch slurm/evaluate.slurm
 
 | File | Purpose |
 |------|---------|
-| `scripts/train_baseline.py` | Supervised CTC baseline (`--unit char/subword/phoneme`, `--conv-strides`) |
+| `scripts/train_baseline.py` | Supervised CTC baseline (`--unit char/subword/phoneme`, `--conv-strides`/`--downsample-factor`) |
 | `scripts/train_subword.py` | Train a SentencePiece subword tokenizer (prerequisite for `--unit subword`) |
+| `scripts/analyze_unit_durations.py` | Per-unit duration vs EMG token period per factor (CTC feasibility) — pick the resolution |
+| `scripts/build_phoneme_dict.py` | Precompute a complete g2p pronunciation dict (OOV-covering) for `--unit phoneme` |
+| `scripts/analyze_sweep_results.py` | Test-set WER/CER (PER) table + reconstructions across `runs/baseline_*` |
+| `scripts/phoneme_to_words.py` | Decode a phoneme checkpoint → words (lexicon + KenLM) → real word WER |
 | `scripts/train_uml.py` | Dual-branch shared-Transformer UML (audio = template for text branch) |
 | `scripts/finetune_from_uml.py` | CTC finetune from UML EMG-branch (encoder + EMG head) |
 | `scripts/finetune_from_jepa.py` | CTC finetune from any encoder-only pretrain (head reset) |

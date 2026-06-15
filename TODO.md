@@ -41,7 +41,7 @@
 - [x] Sweep launchers: `slurm/sweep_resolution.sh` (one parallel job per factor) and
       `slurm/sweep_unit.slurm` (all factors sequentially in one allocation).
 
-### B. Supervised baselines per (unit × resolution) — **IN PROGRESS**
+### B. Supervised baselines per (unit × resolution) — **DONE → chosen: characters @ 16×**
 
 Matched-resolution method (`analyze_unit_durations.py`, train split): set the EMG token
 period (`factor / 689.06 s`) a few × below the per-unit duration. The *densest* utterance is
@@ -50,7 +50,7 @@ proven sweet spot). Per-unit medians and the matched factor band:
 
 | unit | median ms/unit | matched factor(s) (~7–8 frames/unit) |
 |---|---|---|
-| char | 87 | **8×** (done); 10× being checked |
+| char | 87 | optimum 16–20× (see results below) |
 | subword-250 | 197 | 16–20× |
 | subword-500 | 241 | 20–25× |
 | subword-1000 | 289 | 25–32× |
@@ -60,42 +60,62 @@ proven sweet spot). Per-unit medians and the matched factor band:
       (beam+KenLM), dev WER 0.326 (best @ epoch 167/200, ~4 h). Reproduces *and beats* the
       phase-1 0.325 supervised baseline. (Greedy was test 0.434 — the KenLM beam does heavy
       lifting on EMG, so the headline is always the beam number.)
-- [ ] Resolution sweeps running (one `train_baseline` per factor, 200 ep, schedule
-      `[125,150,175]`; → `runs/baseline_<tag>_<F>x`), as of 2026-06-03, matched factor first:
-      - char `[10 16 20 25]` — job 10156693 (h100, running)
-      - subword_250 `[16 20 25 32 40]` — job 10156694 (h100, running)
-      - subword_500 `[20 25 32]` — job 10162648 (a100, queued)
-      - subword_1000 `[25 32 20]` — job 10162649 (h200, queued)
-      - phoneme `[10 8 16]` (g2p dict) — job 10162650 (a100, queued)
-      (subword/phoneme moved off the saturated h100 queue to a100/h200 for overnight turnaround.)
-- [ ] Collect test WER/CER (PER for phoneme) per (unit, factor) with `evaluate.py` once
-      checkpoints land → build the (unit × resolution) table. This is the reference each
-      unpaired-text experiment (C) is measured against.
-- Open question: does a coarser unit + matched-coarser EMG resolution beat char-8× (0.315)?
-  (fewer CTC frames → less peaky alignment, but a larger softmax and sparser supervision.)
+- [x] **Resolution sweeps run** (single `train_baseline` per factor via `sweep_unit.slurm`,
+      200 ep, schedule `[125,150,175]`; → `runs/baseline_<tag>_<F>x`). Regenerate the table any
+      time with `sbatch slurm/analyze_sweep.slurm` → `runs/sweep_summary_test.md`. **Test WER**
+      (pyctcdecode beam + KenLM; char/subword directly comparable; phoneme = greedy PER):
 
-#### Potential follow-up: phoneme → words (only if PER is low enough)
-The phoneme baseline's reported metric is a **phone error rate (PER)** — there is no phoneme
-LM, so its beam runs LM-free while char/subword beams get the KenLM word LM. If the phoneme
-PER comes out competitive, convert phone hypotheses back to **words** to get a comparable (and
-possibly better) WER: beam-decode phones against a **pronunciation lexicon + word LM** (a
-phoneme→word FST, e.g. inverting `phoneme_g2p.dict`), or a small phoneme→grapheme model. That
-would let the denser-supervision phoneme unit borrow the same linguistic prior the char/subword
-beams already use. Go/no-go from the PER numbers; skip if PER is not competitive with char.
+      | unit | best test WER (factor) | curve |
+      |---|---|---|
+      | **char** | **0.292 (20×)** / 0.296 (16×) | 8× .315 → 10× .300 → 16× .296 → 20× .292 |
+      | subword-60 | ~0.31 (16×, dev) | dev 10× .331 / 16× .311 / 20× .357 — ≈ char-10×, ≤ char |
+      | subword-100 | ~0.33 (10×, dev) | dev 10× .330 / 16× .333 / 20× .357 — ≤ char |
+      | subword-250 | 0.283 (25×) | 16× .290 / 20× .294 / 25× .283 |
+      | subword-500 | 0.298 (16×) | 16× .298 / 20× .319 / 25× .357 / 32× .328 |
+      | subword-1000 | 0.333 (16×) | 16× .333 / 20× .335 |
+      | phoneme | dropped | greedy PER 0.161 (16×); 8× collapses (all-blank, too fine) |
 
-### C. Text as the unpaired modality
-- [ ] Build a `TextFrontend` (text → embedding sequence feeding the shared transformer) and
-      a text dataset reader, mirroring `uml/model.py::AudioFrontend` and
-      `uml/audio_dataset.py`. Reuse the shared-transformer plumbing in `UMLModel`.
-- [ ] Two corpora, compared head-to-head:
-      - large generic English text corpus;
-      - the transcripts shipped with the Gaddy audio (in-distribution text).
-- [ ] Train EMG+text UML per chosen resolution, then EMG-only finetune
-      (`finetune_from_uml.py`). Compare to the per-resolution supervised baseline (B) and to
-      the phase-1 audio-UML 0.287.
-- Carry over phase-1 lessons: `clip_grad_norm` disabled by default; `share_ctc_head` off;
-  λ≈0.3 (down-weighted second branch) was best for both audio sources after finetune —
-  start there for text.
+- **Finding — token resolution matters, and coarser-than-phase-1 wins.** char improves
+  monotonically 8×(0.315)→20×(0.292): the phase-1 8× default was *too fine*. The optimum sits
+  at ~16–20× (≈23–29 ms/frame, ~3–4 frames/char), squarely in the speech-ASR 20–40 ms band →
+  the best EMG frame rate is set by the **signal's information rate, not the unit length**
+  ("H-signal"). True for every unit (even char, the densest, peaks ≥16×).
+- **DECISION → predict CHARACTERS at 16×** (`--unit char --downsample-factor 16`;
+  `conv_strides=[2,2,2,2]`, ~43 Hz, ~23 ms/frame). char is best-or-tied on the *fair*
+  (identical-decoder) comparison and simplest (no tokenizer/lexicon, graceful greedy). No
+  subword vocab (60/100/250/500/1000) robustly beats it — subword-250-25× (0.283) is one noisy
+  point; on dev every subword ≥ char.
+- **Phonemes dropped.** Apples-to-apples (`flash_cmp` log — char *and* phoneme through the SAME
+  flashlight lexicon+KenLM decoder, `scripts/decode_lexicon_flashlight.py`): char-16× **0.248**
+  < phoneme-16× **0.275**. Phonemes only looked competitive when handed a stronger decoder than
+  char; equalize the decoder → char wins. They also can't decode without a lexicon (greedy =
+  garbage), lean harder on the leaky LM, and add OOV complexity. Phoneme→word exploration kept
+  for reference: `phoneme_to_words[_lattice].py`, `build_lexicon_from_unigrams.py`,
+  `phoneme_diag.py`, `decode_lexicon_flashlight.py`.
+
+> **⚠️ LM-leakage caveat (applies to ALL beam/LM numbers above):** the test set is *War of the
+> Worlds*, whose text is in the LibriSpeech KenLM (`data/lm.binary`) → absolute WERs are
+> optimistically low (the *relative* unit/resolution ordering is trustworthy; absolutes aren't).
+> Decoder also matters: char-16× = 0.296 (pyctcdecode) vs 0.248 (flashlight lexicon).
+> **Freeze ONE decoder** for all phase-2 comparisons.
+
+### C. Text as the unpaired modality — **NEXT**
+EMG branch is fixed: **char @ 16×** (`--unit char --downsample-factor 16`).
+- [ ] Build a `TextFrontend` (text → embedding sequence into the shared transformer) and a text
+      dataset reader, mirroring `uml/model.py::AudioFrontend` and `uml/audio_dataset.py`; reuse
+      the shared-transformer plumbing in `UMLModel` (inference = EMG branch only).
+- [ ] Two corpora head-to-head: (a) a large generic English corpus; (b) the Gaddy transcripts
+      (in-distribution). **🔴 Dedup any generic corpus against the test/dev transcripts (War of
+      the Worlds + the Gaddy books) before training — else an unpaired-text "gain" is just text
+      leakage.**
+- [ ] Train EMG+text UML at char-16×, then EMG-only finetune (`finetune_from_uml.py`). Compare
+      to the char-16× supervised baseline (≈0.296 pyctcdecode / 0.248 flashlight) and the
+      phase-1 audio-UML **0.287**.
+- Carry phase-1 UML lessons: `clip_grad_norm` off; `share_ctc_head` off; **λ≈0.3** (down-weighted
+      second branch) was best after finetune — start there.
+- Metric hygiene: freeze one decoder across conditions; report a leakage-controlled signal
+      (greedy/CER deltas, or a KenLM rebuilt without the test book) so a "win" reflects EMG
+      learning, not the LM.
 
 ### D. Unsupervised setting
 - [ ] Unsupervised objective consuming un-transcribed text/EMG on the shared transformer
