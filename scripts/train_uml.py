@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import os
 import random
 import time
@@ -38,15 +39,17 @@ import torch.nn.functional as F
 from torch import nn
 from torch.utils.data import DataLoader
 
-from semg_jepa.architecture import GaddyRawEMGEncoder, CTCHead
+from semg_jepa.architecture import GaddyRawEMGEncoder, CTCHead, factor_to_strides
 from semg_jepa.augmentations import RawEMGAugment
 from semg_jepa.cached_dataset import CachedRawEMGDataset, build_batches
 from semg_jepa.config_utils import parse_with_config, setup_stdout_logging
 from semg_jepa.ctc_utils import evaluate
 from semg_jepa.data_utils import combine_fixed_length, decollate_tensor
+from semg_jepa.tokenizers import build_tokenizer
 from semg_jepa.wandb_utils import finish_wandb, init_wandb, wandb_log
 
 from uml.audio_dataset import LibriSpeechCharDataset
+from uml.text_dataset import TextCorpusDataset
 from uml.model import UMLModel, ctc_loss_from_logits
 
 
@@ -61,6 +64,17 @@ class _EMGInferenceWrapper(nn.Module):
 
     def forward(self, raw_emg: torch.Tensor) -> torch.Tensor:
         return self.uml.forward_emg(raw_emg)
+
+
+def _load_unit_targets(units_dir: str, split: str) -> dict:
+    """Load a precomputed HuBERT-unit cache: {sample_id -> list[int]}."""
+    path = os.path.join(units_dir, f"{split}.pt")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"HuBERT unit cache not found: {path}. Run scripts/precompute_hubert_units.py first."
+        )
+    payload = torch.load(path, map_location="cpu")
+    return payload["units"]
 
 
 def parse_args():
@@ -86,9 +100,80 @@ def parse_args():
     p.add_argument("--lr-decay-gamma", type=float, default=0.5)
     p.add_argument("--clip-grad-norm", type=float, default=1.0)
     p.add_argument("--lambda-uml", type=float, default=1.0,
-                   help="Weight on the audio CTC loss.")
+                   help="Weight on the second-branch (audio/text) CTC loss.")
     p.add_argument("--share-ctc-head", action="store_true",
-                   help="If set, EMG and audio branches share the same CTCHead.")
+                   help="If set, EMG and the second branch share the same CTCHead.")
+    # Phase-2 §C: the second branch can be unpaired TEXT instead of audio.
+    p.add_argument("--second-branch", choices=["audio", "text"], default="audio",
+                   help="Auxiliary modality sharing the transformer (default audio).")
+    # Frontend-symmetry knob: how much of wav2vec2 runs before the SHARED transformer.
+    # full = whole wav2vec2 incl. its 12 self-attention layers (last_hidden_state); audio
+    # reaches the shared transformer already contextualized while EMG (conv-only) has not.
+    # conv = wav2vec2 conv feature extractor ONLY (no attention), mirroring the conv-only EMG
+    # frontend so the shared transformer contextualizes both modalities from local features.
+    p.add_argument("--audio-frontend", choices=["full", "conv"], default="full",
+                   help="Audio frontend depth before the shared transformer (audio branch).")
+    # Multi-auxiliary UML (paper Thm 1: Fisher info compounds across modalities). When set to
+    # more than one, ALL listed auxiliaries share the transformer, each with its own CTC head;
+    # per step we do 1 EMG + 1 batch of EACH aux (weighted by --lambda-{audio,text}). If unset,
+    # falls back to the single --second-branch (weighted by --lambda-uml).
+    p.add_argument("--aux-branches", nargs="+", choices=["audio", "text"], default=None,
+                   help="Auxiliary modalities to combine (e.g. 'audio text'). Overrides --second-branch.")
+    p.add_argument("--lambda-audio", type=float, default=None,
+                   help="Audio-branch loss weight in multi-aux mode (default: --lambda-uml).")
+    p.add_argument("--lambda-text", type=float, default=None,
+                   help="Text-branch loss weight in multi-aux mode (default: --lambda-uml).")
+    p.add_argument("--seed", type=int, default=None,
+                   help="Seed torch/np/random for paired multi-aux-vs-baseline comparisons.")
+    p.add_argument("--text-source", choices=["libri", "gaddy"], default="libri",
+                   help="Unpaired-text corpus when --second-branch text.")
+    p.add_argument("--text-frontend", choices=["embed", "frozen"], default="embed",
+                   help="embed: trainable char embedding (corruption+upsample in collate). "
+                        "frozen: frozen CANINE char encoder + trainable Linear (mirrors the "
+                        "audio frontend); features are upsampled in the frontend, so the "
+                        "collate does NOT pre-upsample.")
+    p.add_argument("--text-frozen-arch", choices=["canine", "byt5"], default="canine",
+                   help="Frozen text-encoder arch for --text-frontend frozen. canine (char, ~120M) "
+                        "or byt5 (byte-level, ~300M+; paper lesson: a stronger frozen text encoder "
+                        "gives bigger UML gains). Both are tokenization-free (1 char = 1 position).")
+    p.add_argument("--text-frozen-model", default=None,
+                   help="HF id of the frozen text encoder (default: per-arch — canine-s / byt5-small).")
+    p.add_argument("--text-cache-dir", default="/scratch/cr4206/sEMG-unpaired-text/data/text_cache")
+    p.add_argument("--text-batch-size", type=int, default=8)
+    p.add_argument("--text-num-workers", type=int, default=2)
+    p.add_argument("--text-p-mask", type=float, default=0.15)
+    p.add_argument("--text-p-sub", type=float, default=0.10)
+    p.add_argument("--text-p-del", type=float, default=0.05)
+    p.add_argument("--text-mask-span-mean", type=float, default=3.0)
+    p.add_argument("--text-upsample", type=int, default=3)
+    p.add_argument("--text-jitter", type=int, default=1)
+    # EMG token unit + temporal resolution (matches train_baseline.py; char @ 16x is the
+    # decided phase-2 config). --downsample-factor takes precedence over --conv-strides.
+    p.add_argument("--unit", choices=["char", "subword", "phoneme", "hubert"], default="char")
+    p.add_argument("--subword-model", default=None)
+    p.add_argument("--phoneme-dict", default=None)
+    # HuBERT-unit target (audio-derived, precomputed via scripts/precompute_hubert_units.py).
+    p.add_argument("--hubert-k", type=int, default=100, help="k-means K for --unit hubert.")
+    p.add_argument("--hubert-units-dir", default="/scratch/cr4206/sEMG-unpaired-text/data/hubert_units",
+                   help="Dir with {train,dev}.pt unit caches for --unit hubert.")
+    p.add_argument("--audio-units-dir", default=None,
+                   help="When --unit hubert and --second-branch audio: dir with "
+                        "<librispeech_split>.pt audio-unit targets (precompute_audio_hubert_units.py). "
+                        "Makes the audio branch predict the SAME km100 units as the EMG branch "
+                        "(the proper UML setup); without it the audio branch would predict chars.")
+    p.add_argument("--voiced-eval-ids", default=None,
+                   help="Path to a newline-separated list of VOICED sample_ids to HOLD OUT of "
+                        "training and evaluate as a second dev set ('vdev'). Separates genuine "
+                        "silent-speech difficulty from (ex-)target degeneracy: vdev is voiced "
+                        "EMG -> its own (clean) units, the main dev is silent EMG. hubert only.")
+    p.add_argument("--conv-strides", type=int, nargs="+", default=[2, 2, 2])
+    p.add_argument("--downsample-factor", type=int, default=None)
+    # Option 1 (frontend symmetry): EMG-private pre-transformer depth. >0 gives the EMG branch
+    # its own attention stack BEFORE the shared transformer, so EMG reaches it already
+    # contextualized (like audio via wav2vec2's full 12-layer transformer). The aux branches
+    # bypass these layers. MUST match --num-private-layers at finetune time.
+    p.add_argument("--num-private-layers", type=int, default=0,
+                   help="EMG-private transformer layers before the shared transformer (Option 1).")
     p.add_argument("--epoch-mode", choices=["alternate", "both"], default="alternate",
                    help="alternate (default): each step does 1 EMG batch + 1 audio "
                         "batch (paired backward, one optim.step). Epoch ends after "
@@ -139,14 +224,112 @@ def train(args):
     run = init_wandb(args, default_name_prefix="uml")
 
     device = "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
-    trainset = CachedRawEMGDataset(args.cache_dir, "train")
-    devset = CachedRawEMGDataset(args.cache_dir, "dev")
-    n_chars = len(devset.text_transform.chars)
 
-    audio_train = LibriSpeechCharDataset(args.librispeech_cache_dir, args.librispeech_split)
+    if args.seed is not None:
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        torch.cuda.manual_seed_all(args.seed)
+        logging.info("seed=%d (torch/np/random)", args.seed)
+
+    # EMG token resolution: --downsample-factor takes precedence over --conv-strides.
+    if getattr(args, "downsample_factor", None):
+        conv_strides = factor_to_strides(args.downsample_factor)
+    else:
+        conv_strides = tuple(args.conv_strides)
+    factor = math.prod(conv_strides)
+    assert args.fixed_raw_len % factor == 0, (
+        f"fixed_raw_len={args.fixed_raw_len} must be divisible by downsample factor {factor}")
+
+    tokenizer = build_tokenizer(
+        args.unit, subword_model=args.subword_model, phoneme_dict=args.phoneme_dict,
+        hubert_k=args.hubert_k,
+    )
+    n_chars = tokenizer.vocab_size
+    # HuBERT units are audio-derived, so CTC targets are read from a precomputed cache
+    # (keyed by sample_id) instead of being re-encoded from the transcript.
+    if tokenizer.targets_from_audio:
+        train_units = _load_unit_targets(args.hubert_units_dir, "train")
+        dev_units = _load_unit_targets(args.hubert_units_dir, "dev")
+        logging.info("loaded HuBERT units: train=%d dev=%d (dev_wer below is a UNIT error rate)",
+                     len(train_units), len(dev_units))
+    else:
+        train_units = dev_units = None
+
+    # Optional held-out VOICED eval set (§3 diagnostic): hold these voiced sample_ids out of
+    # train and evaluate them separately ("vdev"), to tell silent difficulty from target noise.
+    voiced_eval_ids = None
+    if args.voiced_eval_ids:
+        with open(args.voiced_eval_ids) as fh:
+            voiced_eval_ids = {ln.strip() for ln in fh if ln.strip()}
+        logging.info("voiced-eval: holding out %d voiced sample_ids from train", len(voiced_eval_ids))
+
+    trainset = CachedRawEMGDataset(args.cache_dir, "train", tokenizer=tokenizer,
+                                   downsample_factor=factor, unit_targets=train_units,
+                                   exclude_ids=voiced_eval_ids)
+    devset = CachedRawEMGDataset(args.cache_dir, "dev", tokenizer=tokenizer,
+                                 downsample_factor=factor, unit_targets=dev_units)
+    vdevset = None
+    if voiced_eval_ids:
+        vdevset = CachedRawEMGDataset(args.cache_dir, "train", tokenizer=tokenizer,
+                                      downsample_factor=factor, unit_targets=train_units,
+                                      include_ids=voiced_eval_ids)
+        logging.info("voiced-eval: vdev=%d samples (voiced EMG -> own units)", len(vdevset))
+
+    # Units without a word LM (phoneme/hubert) must score greedy: beam glues the labels
+    # with no spaces and mis-renders them (cf. train_baseline.py).
+    eval_method = args.eval_method if tokenizer.supports_word_lm else "greedy"
+    if eval_method != args.eval_method:
+        logging.info("eval_method forced to 'greedy' (unit=%s has no word LM)", args.unit)
+
+    # Auxiliary modalities (multi-aux = paper Thm 1: Fisher info compounds). --aux-branches
+    # overrides --second-branch; each aux keeps its OWN dataset + loss weight and shares the
+    # transformer. A pure baseline is any subset with its lambda=0 (branch present but inert).
+    aux_names = []
+    for b in (args.aux_branches or [args.second_branch]):
+        if b not in aux_names:
+            aux_names.append(b)
+    lam_of = {
+        "audio": args.lambda_audio if args.lambda_audio is not None else args.lambda_uml,
+        "text": args.lambda_text if args.lambda_text is not None else args.lambda_uml,
+    }
+
+    def _build_aux(name):
+        if name == "text":
+            # frozen frontend upsamples features itself -> the collate must NOT pre-upsample.
+            ds_upsample = 1 if args.text_frontend == "frozen" else args.text_upsample
+            ds_jitter = 0 if args.text_frontend == "frozen" else args.text_jitter
+            ds = TextCorpusDataset(
+                args.text_cache_dir, args.text_source,
+                vocab_size=tokenizer.vocab_size,
+                p_mask=args.text_p_mask, p_sub=args.text_p_sub, p_del=args.text_p_del,
+                mask_span_mean=args.text_mask_span_mean,
+                upsample=ds_upsample, jitter=ds_jitter,
+            )
+            return ds, f"text:{args.text_source}:{args.text_frontend}"
+        audio_units_path = None
+        if args.audio_units_dir:
+            audio_units_path = os.path.join(args.audio_units_dir, f"{args.librispeech_split}.pt")
+            if not os.path.exists(audio_units_path):
+                raise FileNotFoundError(
+                    f"audio unit targets not found: {audio_units_path} "
+                    f"(run scripts/precompute_audio_hubert_units.py for split '{args.librispeech_split}')")
+        ds = LibriSpeechCharDataset(
+            args.librispeech_cache_dir, args.librispeech_split,
+            unit_targets_path=audio_units_path,
+        )
+        return ds, (f"audio:{args.librispeech_split}:{'units' if audio_units_path else 'char'}"
+                    f":frontend={args.audio_frontend}")
+
+    aux_specs = []
+    for name in aux_names:
+        ds, desc = _build_aux(name)
+        aux_specs.append({"name": name, "dataset": ds, "desc": desc, "lam": lam_of[name]})
     logging.info(
-        "data emg_train=%d emg_dev=%d audio_train=%d (split=%s)",
-        len(trainset), len(devset), len(audio_train), args.librispeech_split,
+        "unit=%s vocab=%d conv_strides=%s factor=%d private_layers=%d | emg_train=%d emg_dev=%d | aux=[%s]",
+        args.unit, tokenizer.vocab_size, conv_strides, factor, args.num_private_layers,
+        len(trainset), len(devset),
+        ", ".join(f"{a['name']}({a['desc']},n={len(a['dataset'])},lam={a['lam']})" for a in aux_specs),
     )
 
     model = UMLModel(
@@ -155,6 +338,14 @@ def train(args):
         num_layers=args.num_layers,
         dropout=args.dropout,
         share_ctc_head=bool(args.share_ctc_head),
+        conv_strides=conv_strides,
+        num_private_layers=args.num_private_layers,
+        aux_branches=tuple(aux_names),
+        audio_frontend_mode=args.audio_frontend,
+        text_frontend=args.text_frontend,
+        text_frozen_model=args.text_frozen_model,
+        text_frozen_arch=args.text_frozen_arch,
+        text_upsample=args.text_upsample,
     ).to(device)
 
     if args.start_training_from:
@@ -182,16 +373,21 @@ def train(args):
         if iteration <= args.learning_rate_warmup:
             set_lr(iteration * args.learning_rate / args.learning_rate_warmup)
 
-    audio_loader = DataLoader(
-        audio_train,
-        batch_size=args.audio_batch_size,
-        shuffle=True,
-        num_workers=args.audio_num_workers,
-        pin_memory=(device == "cuda"),
-        persistent_workers=(args.audio_num_workers > 0),
-        collate_fn=LibriSpeechCharDataset.collate_fn,
-        drop_last=True,
-    )
+    for a in aux_specs:
+        if a["name"] == "text":
+            a["loader"] = DataLoader(
+                a["dataset"], batch_size=args.text_batch_size, shuffle=True,
+                num_workers=args.text_num_workers, pin_memory=(device == "cuda"),
+                persistent_workers=(args.text_num_workers > 0),
+                collate_fn=a["dataset"].collate_fn, drop_last=True,
+            )
+        else:
+            a["loader"] = DataLoader(
+                a["dataset"], batch_size=args.audio_batch_size, shuffle=True,
+                num_workers=args.audio_num_workers, pin_memory=(device == "cuda"),
+                persistent_workers=(args.audio_num_workers > 0),
+                collate_fn=LibriSpeechCharDataset.collate_fn, drop_last=True,
+            )
 
     os.makedirs(args.output_directory, exist_ok=True)
     run_ts = time.strftime("%Y%m%d_%H%M")
@@ -251,7 +447,7 @@ def train(args):
         t["bwd_emg"] += time.perf_counter() - t2
         return loss_emg.item()
 
-    def _audio_step(audio_batch, t):
+    def _audio_step(audio_batch, t, lam):
         t1 = time.perf_counter()
         wav = audio_batch["audio_features"].to(device)
         audio_lengths = audio_batch["audio_lengths"].to(device)
@@ -267,20 +463,42 @@ def train(args):
         t["fwd_audio"] += time.perf_counter() - t1
 
         t2 = time.perf_counter()
-        (args.lambda_uml * loss_audio).backward()
+        (lam * loss_audio).backward()
         _sync(device)
         t["bwd_audio"] += time.perf_counter() - t2
         return loss_audio.item()
+
+    def _text_step(text_batch, t, lam):
+        t1 = time.perf_counter()
+        tok_ids = text_batch["text_input"].to(device)
+        tok_lens = text_batch["text_input_lengths"].to(device)
+        t_targets = text_batch["text_int"].to(device)
+        t_target_lengths = text_batch["text_int_lengths"].to(device)
+        text_logits, text_input_lengths = model.forward_text(tok_ids, tok_lens)
+        loss_text = ctc_loss_from_logits(
+            text_logits, t_targets, text_input_lengths.to(device), t_target_lengths,
+            blank=model.blank_id,
+        )
+        _sync(device)
+        t["fwd_audio"] += time.perf_counter() - t1
+
+        t2 = time.perf_counter()
+        (lam * loss_text).backward()
+        _sync(device)
+        t["bwd_audio"] += time.perf_counter() - t2
+        return loss_text.item()
+
+    step_of = {"audio": _audio_step, "text": _text_step}
 
     for epoch in range(args.epochs):
         model.train()
 
         emg_loader, n_emg_batches = _make_emg_loader()
-        n_audio_batches = len(audio_loader)
         emg_iter = iter(emg_loader)
-        audio_iter = iter(audio_loader)
+        aux_iters = {a["name"]: iter(a["loader"]) for a in aux_specs}
 
-        emg_losses, audio_losses = [], []
+        emg_losses = []
+        aux_losses = {a["name"]: [] for a in aux_specs}
         t = {"data_emg": 0.0, "data_audio": 0.0,
              "fwd_emg": 0.0, "bwd_emg": 0.0,
              "fwd_audio": 0.0, "bwd_audio": 0.0,
@@ -288,39 +506,45 @@ def train(args):
         epoch_start = time.perf_counter()
         n_steps = 0
 
+        def _run_aux(a):
+            td0 = time.perf_counter()
+            try:
+                batch = next(aux_iters[a["name"]])
+            except StopIteration:
+                aux_iters[a["name"]] = iter(a["loader"])  # reshuffles
+                batch = next(aux_iters[a["name"]])
+            t["data_audio"] += time.perf_counter() - td0
+            aux_losses[a["name"]].append(step_of[a["name"]](batch, t, a["lam"]))
+
+        def _maybe_step():
+            t_opt0 = time.perf_counter()
+            if (global_step + 1) % args.grad_accum_steps == 0:
+                if args.clip_grad_norm and args.clip_grad_norm > 0:
+                    nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
+                optim.step()
+                optim.zero_grad()
+                _sync(device)
+            t["opt"] += time.perf_counter() - t_opt0
+
         if args.epoch_mode == "alternate":
-            # 1 EMG + 1 audio per step, paired backward, single optim.step.
+            # 1 EMG + 1 batch of EACH aux per step, all backward, single optim.step.
             t0 = time.perf_counter()
             for _ in range(n_emg_batches):
                 schedule_lr(global_step)
-
                 emg_batch = next(emg_iter)
                 t["data_emg"] += time.perf_counter() - t0
                 emg_losses.append(_emg_step(emg_batch, t))
-
-                t_audio_data0 = time.perf_counter()
-                try:
-                    audio_batch = next(audio_iter)
-                except StopIteration:
-                    audio_iter = iter(audio_loader)  # reshuffles
-                    audio_batch = next(audio_iter)
-                t["data_audio"] += time.perf_counter() - t_audio_data0
-                audio_losses.append(_audio_step(audio_batch, t))
-
-                t_opt0 = time.perf_counter()
-                if (global_step + 1) % args.grad_accum_steps == 0:
-                    if args.clip_grad_norm and args.clip_grad_norm > 0:
-                        nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
-                    optim.step()
-                    optim.zero_grad()
-                    _sync(device)
-                t["opt"] += time.perf_counter() - t_opt0
-
+                for a in aux_specs:
+                    _run_aux(a)
+                _maybe_step()
                 global_step += 1
                 n_steps += 1
                 t0 = time.perf_counter()
-        else:  # "both": each step is one modality, all batches seen exactly once.
-            sched = ["emg"] * n_emg_batches + ["audio"] * n_audio_batches
+        else:  # "both": one modality per step, all batches seen once (single aux only).
+            if len(aux_specs) != 1:
+                raise ValueError("epoch_mode 'both' supports exactly one aux branch")
+            a0 = aux_specs[0]
+            sched = ["emg"] * n_emg_batches + ["aux"] * len(a0["loader"])
             random.shuffle(sched)
             t0 = time.perf_counter()
             for modality in sched:
@@ -330,61 +554,58 @@ def train(args):
                     t["data_emg"] += time.perf_counter() - t0
                     emg_losses.append(_emg_step(emg_batch, t))
                 else:
-                    audio_batch = next(audio_iter)
-                    t["data_audio"] += time.perf_counter() - t0
-                    audio_losses.append(_audio_step(audio_batch, t))
-
-                t_opt0 = time.perf_counter()
-                if (global_step + 1) % args.grad_accum_steps == 0:
-                    if args.clip_grad_norm and args.clip_grad_norm > 0:
-                        nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
-                    optim.step()
-                    optim.zero_grad()
-                    _sync(device)
-                t["opt"] += time.perf_counter() - t_opt0
-
+                    _run_aux(a0)
+                _maybe_step()
                 global_step += 1
                 n_steps += 1
                 t0 = time.perf_counter()
 
         train_emg = float(np.mean(emg_losses)) if emg_losses else 0.0
-        train_audio = float(np.mean(audio_losses)) if audio_losses else 0.0
+        train_aux = {n: (float(np.mean(v)) if v else 0.0) for n, v in aux_losses.items()}
 
         eval_start = time.perf_counter()
-        wer, cer = evaluate(eval_wrapper, devset, device, method=args.eval_method)
+        wer, cer = evaluate(eval_wrapper, devset, device, method=eval_method)
+        vdev_wer = vdev_cer = None
+        if vdevset is not None:
+            vdev_wer, vdev_cer = evaluate(eval_wrapper, vdevset, device, method=eval_method)
         t_eval = time.perf_counter() - eval_start
 
         lr_sched.step()
         t_epoch = time.perf_counter() - epoch_start
         cur_lr = optim.param_groups[0]["lr"]
 
+        vdev_str = (f" vdev_wer={vdev_wer:.3f} vdev_cer={vdev_cer:.3f}"
+                    if vdev_wer is not None else "")
+        aux_str = " ".join(f"{a['name']}_loss={train_aux[a['name']]:.4f}(lam{a['lam']:.2f})"
+                           for a in aux_specs)
         logging.info(
-            "epoch=%d/%d steps=%d lr=%.2e emg_loss=%.4f audio_loss=%.4f lambda=%.3f "
-            "dev_wer=%.3f dev_cer=%.3f t_data_emg=%.1fs t_data_audio=%.1fs "
-            "t_fwd_emg=%.1fs t_bwd_emg=%.1fs t_fwd_audio=%.1fs t_bwd_audio=%.1fs "
+            "epoch=%d/%d steps=%d lr=%.2e emg_loss=%.4f %s "
+            "dev_wer=%.3f dev_cer=%.3f%s t_data_emg=%.1fs t_data_aux=%.1fs "
+            "t_fwd_emg=%.1fs t_bwd_emg=%.1fs t_fwd_aux=%.1fs t_bwd_aux=%.1fs "
             "t_opt=%.1fs t_eval=%.1fs t_epoch=%.1fs",
             epoch + 1, args.epochs, n_steps, cur_lr,
-            train_emg, train_audio, args.lambda_uml, wer, cer,
+            train_emg, aux_str, wer, cer, vdev_str,
             t["data_emg"], t["data_audio"],
             t["fwd_emg"], t["bwd_emg"], t["fwd_audio"], t["bwd_audio"],
             t["opt"], t_eval, t_epoch,
         )
         wandb_log(run, {
             "eval/wer": wer, "eval/cer": cer,
+            **({"eval/vdev_wer": vdev_wer, "eval/vdev_cer": vdev_cer} if vdev_wer is not None else {}),
             "train/emg_loss": train_emg,
-            "train/audio_loss": train_audio,
-            "train/total_loss": train_emg + args.lambda_uml * train_audio,
+            **{f"train/{a['name']}_loss": train_aux[a["name"]] for a in aux_specs},
+            "train/total_loss": train_emg + sum(a["lam"] * train_aux[a["name"]] for a in aux_specs),
             "train/lr": cur_lr,
-            "uml/lambda": args.lambda_uml,
-            "time/data_emg": t["data_emg"], "time/data_audio": t["data_audio"],
+            **{f"uml/lambda_{a['name']}": a["lam"] for a in aux_specs},
+            "time/data_emg": t["data_emg"], "time/data_aux": t["data_audio"],
             "time/fwd_emg": t["fwd_emg"], "time/bwd_emg": t["bwd_emg"],
-            "time/fwd_audio": t["fwd_audio"], "time/bwd_audio": t["bwd_audio"],
+            "time/fwd_aux": t["fwd_audio"], "time/bwd_aux": t["bwd_audio"],
             "time/opt": t["opt"],
             "time/eval": t_eval, "time/epoch": t_epoch,
             "epoch": epoch + 1,
         })
 
-        # Full UML state (resume + audio branch retained)
+        # Full UML state (resume + second branch retained)
         torch.save(model.state_dict(), os.path.join(args.output_directory, "last.pt"))
         torch.save(model.state_dict(), os.path.join(args.output_directory, f"last_{run_ts}.pt"))
         # EMG-only weights, ready for finetune_from_jepa-style loading.

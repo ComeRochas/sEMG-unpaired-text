@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import os
 import time
 
@@ -31,11 +32,12 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from semg_jepa.architecture import BaselineCTCModel
+from semg_jepa.architecture import BaselineCTCModel, factor_to_strides
 from semg_jepa.cached_dataset import CachedRawEMGDataset, build_batches
 from semg_jepa.config_utils import parse_with_config, setup_stdout_logging
 from semg_jepa.ctc_utils import evaluate
 from semg_jepa.data_utils import combine_fixed_length, decollate_tensor
+from semg_jepa.tokenizers import build_tokenizer
 from semg_jepa.wandb_utils import finish_wandb, init_wandb, wandb_log
 
 
@@ -101,6 +103,16 @@ def parse_args():
     p.add_argument("--model-size", type=int, default=768)
     p.add_argument("--num-layers", type=int, default=6)
     p.add_argument("--dropout", type=float, default=0.2)
+    # EMG token unit + temporal resolution — MUST match the UML checkpoint being
+    # finetuned (phase-2 default: char @ 16x). --downsample-factor beats --conv-strides.
+    p.add_argument("--unit", choices=["char", "subword", "phoneme"], default="char")
+    p.add_argument("--subword-model", default=None)
+    p.add_argument("--phoneme-dict", default=None)
+    p.add_argument("--conv-strides", type=int, nargs="+", default=[2, 2, 2])
+    p.add_argument("--downsample-factor", type=int, default=None)
+    # MUST match the UML checkpoint's --num-private-layers (Option 1 EMG pre-transformer),
+    # else the encoder state dict won't align.
+    p.add_argument("--num-private-layers", type=int, default=0)
     p.add_argument("--eval-method", choices=["greedy", "beam"], default="beam")
     p.add_argument("--wandb", action="store_true")
     p.add_argument("--wandb-entity", default="UMLforVideoLab")
@@ -119,15 +131,28 @@ def train(args):
     run = init_wandb(args, default_name_prefix="finetune_uml")
 
     device = "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
-    trainset = CachedRawEMGDataset(args.cache_dir, "train")
-    devset = CachedRawEMGDataset(args.cache_dir, "dev")
-    n_chars = len(devset.text_transform.chars)
+
+    if getattr(args, "downsample_factor", None):
+        conv_strides = factor_to_strides(args.downsample_factor)
+    else:
+        conv_strides = tuple(args.conv_strides)
+    factor = math.prod(conv_strides)
+
+    tokenizer = build_tokenizer(
+        args.unit, subword_model=args.subword_model, phoneme_dict=args.phoneme_dict,
+    )
+    n_chars = tokenizer.vocab_size
+    trainset = CachedRawEMGDataset(args.cache_dir, "train", tokenizer=tokenizer, downsample_factor=factor)
+    devset = CachedRawEMGDataset(args.cache_dir, "dev", tokenizer=tokenizer, downsample_factor=factor)
+    logging.info("unit=%s vocab=%d conv_strides=%s factor=%d", args.unit, n_chars, conv_strides, factor)
 
     model = BaselineCTCModel(
         model_size=args.model_size,
         num_layers=args.num_layers,
         dropout=args.dropout,
         vocab_size=n_chars,
+        conv_strides=conv_strides,
+        num_private_layers=args.num_private_layers,
     ).to(device)
 
     ckpt_path = args.emg_branch or args.uml_full_ckpt

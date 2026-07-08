@@ -77,7 +77,7 @@ class GaddyRawEMGEncoder(nn.Module):
     """
 
     def __init__(self, model_size=768, num_layers=6, dropout=0.2, apply_train_shift=True,
-                 conv_strides=(2, 2, 2)):
+                 conv_strides=(2, 2, 2), num_private_layers=0):
         super().__init__()
         self.apply_train_shift = apply_train_shift
         self.conv_strides = tuple(conv_strides)
@@ -88,15 +88,28 @@ class GaddyRawEMGEncoder(nn.Module):
             in_ch = model_size
         self.conv_blocks = nn.Sequential(*blocks)
         self.w_raw_in = nn.Linear(model_size, model_size)
-        encoder_layer = TransformerEncoderLayer(
-            d_model=model_size,
-            nhead=8,
-            relative_positional=True,
-            relative_positional_distance=100,
-            dim_feedforward=3072,
-            dropout=dropout,
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers)
+
+        def _make_transformer(n):
+            layer = TransformerEncoderLayer(
+                d_model=model_size,
+                nhead=8,
+                relative_positional=True,
+                relative_positional_distance=100,
+                dim_feedforward=3072,
+                dropout=dropout,
+            )
+            return nn.TransformerEncoder(layer, n)
+
+        # EMG-private pre-transformer (Option 1, frontend symmetry): extra EMG-only
+        # attention layers applied BEFORE the shared transformer, so EMG — like audio
+        # via wav2vec2's 12 layers — reaches the shared transformer already contextualized
+        # by self-attention. The UML audio/text branches call ``self.transformer`` directly
+        # (see ``UMLModel.forward_audio``), so they never traverse ``pre_transformer``.
+        # num_private_layers=0 (default) reproduces the phase-1 encoder exactly (no extra
+        # state-dict keys), so old checkpoints keep loading.
+        self.num_private_layers = int(num_private_layers)
+        self.pre_transformer = _make_transformer(self.num_private_layers) if self.num_private_layers > 0 else None
+        self.transformer = _make_transformer(num_layers)
 
     def forward(self, raw_emg: torch.Tensor) -> torch.Tensor:
         x_raw = raw_emg
@@ -111,6 +124,8 @@ class GaddyRawEMGEncoder(nn.Module):
         x_raw = self.conv_blocks(x_raw)
         x_raw = x_raw.transpose(1, 2)
         x_raw = self.w_raw_in(x_raw)
+        if self.pre_transformer is not None:
+            x_raw = self.pre_transformer(x_raw.transpose(0, 1)).transpose(0, 1)
         x = self.transformer(x_raw.transpose(0, 1)).transpose(0, 1)
         return x
 
@@ -128,11 +143,11 @@ class CTCHead(nn.Module):
 
 class BaselineCTCModel(nn.Module):
     def __init__(self, model_size=768, num_layers=6, dropout=0.2, vocab_size=37,
-                 conv_strides=(2, 2, 2)):
+                 conv_strides=(2, 2, 2), num_private_layers=0):
         super().__init__()
         self.encoder = GaddyRawEMGEncoder(
             model_size=model_size, num_layers=num_layers, dropout=dropout,
-            conv_strides=conv_strides,
+            conv_strides=conv_strides, num_private_layers=num_private_layers,
         )
         self.ctc_head = CTCHead(model_size=model_size, vocab_size=vocab_size)
 

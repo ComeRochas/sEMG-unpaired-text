@@ -124,6 +124,9 @@ def compute_log_probs(model, dataset, device, batch_size=None):
     bs = batch_size if batch_size is not None else (16 if on_gpu else 1)
     collate = _make_eval_collate(getattr(dataset, "downsample_factor", 8))
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=bs, collate_fn=collate)
+    # Audio-derived units (HuBERT) have no text rendering: the reference is the gold
+    # unit sequence, so WER over it is a unit error rate (selection metric for best.pt).
+    targets_from_audio = getattr(dataset.tokenizer, "targets_from_audio", False)
 
     log_probs_list, references = [], []
     with torch.no_grad():
@@ -132,7 +135,15 @@ def compute_log_probs(model, dataset, device, batch_size=None):
             lp = F.log_softmax(model(raw_padded), -1).cpu()
             for i, T in enumerate(seq_lens.tolist()):
                 log_probs_list.append(lp[i, :T].numpy().astype(np.float32))
-                references.append(dataset.tokenizer.reference_text(texts[i]))
+                if not targets_from_audio:
+                    references.append(dataset.tokenizer.reference_text(texts[i]))
+    if targets_from_audio:
+        # DataLoader above uses the default sequential sampler, so log_probs_list is in
+        # dataset order 0..N-1; render gold unit ids in the same order.
+        references = [
+            dataset.tokenizer.int_to_text(dataset[i]["text_int"].tolist())
+            for i in range(len(dataset))
+        ]
     model.train()
     return log_probs_list, references
 

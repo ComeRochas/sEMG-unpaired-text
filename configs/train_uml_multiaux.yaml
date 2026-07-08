@@ -1,0 +1,66 @@
+# Multi-auxiliary UML (paper Thm 1: Fisher info compounds across modalities).
+# EMG + AUDIO + TEXT all share the transformer, each with its own char CTC head. EMG target
+# modality unchanged (inference = EMG only). Audio = Gaddy-internal (in-domain, acoustic);
+# text = LibriSpeech, frozen-CANINE frontend (linguistic, large corpus) — complementary signals.
+# Baseline = same config with lambda_audio=lambda_text=0 (branches present but inert).
+# CLI flags override these; --seed and the lambdas are set per run at launch.
+
+cache_dir: /scratch/cr4206/sEMG-unpaired-text/data
+
+# --- audio auxiliary (Gaddy-internal) ---
+librispeech_cache_dir: /scratch/cr4206/sEMG-unpaired-text/data/gaddy_audio_cache
+librispeech_split: gaddy_internal
+audio_batch_size: 8
+audio_num_workers: 2
+
+# --- text auxiliary (LibriSpeech corpus, frozen CANINE) ---
+text_cache_dir: /scratch/cr4206/sEMG-unpaired-text/data/text_cache
+text_source: libri
+text_frontend: frozen
+text_frozen_model: google/canine-s
+text_batch_size: 8
+text_num_workers: 2
+text_p_mask: 0.15
+text_p_sub: 0.10
+text_p_del: 0.05
+text_upsample: 3
+text_jitter: 1
+
+# --- multi-aux wiring ---
+aux_branches: [audio, text]
+lambda_audio: 0.3
+lambda_text: 0.3
+
+output_directory: /scratch/cr4206/sEMG-unpaired-text/runs/uml_multiaux
+
+# --- EMG target: char @ 16x (decided phase-2 config) ---
+unit: char
+downsample_factor: 16
+
+epochs: 200
+max_batch_len: 88000
+fixed_raw_len: 1600
+
+learning_rate: 3.0e-4
+learning_rate_warmup: 1000
+l2: 0.0
+grad_accum_steps: 2
+lr_decay_milestones: [125, 150, 175]
+lr_decay_gamma: 0.5
+clip_grad_norm: 0.0          # phase-1 text lesson: clip off for the text branch
+
+share_ctc_head: false
+epoch_mode: alternate
+
+model_size: 768
+num_layers: 6
+dropout: 0.2
+
+start_training_from: null
+eval_method: beam            # char has a word LM -> real word-WER on dev
+
+wandb: false
+wandb_entity: UMLforVideoLab
+wandb_project: JEPAforsEMG
+wandb_run_name: null
+wandb_tags: [uml, multiaux, char16x]

@@ -15,7 +15,8 @@ audio_num_workers: 2
 learning_rate: 3.0e-4
 learning_rate_warmup: 1000
 l2: 0.0
-grad_accum_steps: 1
+grad_accum_steps: 2   # match train_baseline.yaml (=2) for the same effective EMG batch;
+                      # with 1 the EMG stage under-converges (~0.027 WER worse than baseline).
 lr_decay_milestones: [125, 150, 175]
 lr_decay_gamma: 0.5
 clip_grad_norm: 1.0   # acts as gradient brake on noisier audio path; do not raise without rebalancing lambda_uml

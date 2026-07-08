@@ -37,7 +37,9 @@ def build_batches(dataset: "CachedRawEMGDataset", max_len: int) -> list[list[int
 
 
 class CachedRawEMGDataset(torch.utils.data.Dataset):
-    def __init__(self, cache_dir: str, split: str, tokenizer=None, downsample_factor: int = 8):
+    def __init__(self, cache_dir: str, split: str, tokenizer=None, downsample_factor: int = 8,
+                 unit_targets: dict | None = None,
+                 include_ids: set | None = None, exclude_ids: set | None = None):
         cache_path = Path(cache_dir) / f"{split}.pt"
         if not cache_path.exists():
             raise FileNotFoundError(f"Cache split file not found: {cache_path}")
@@ -46,11 +48,31 @@ class CachedRawEMGDataset(torch.utils.data.Dataset):
         self.version = payload.get("version", 0)
         self.metadata = payload.get("metadata", {})
         self.samples = payload["samples"]
+        # Optional sample_id filtering: carve a held-out subset out of a split (e.g. a
+        # voiced eval set held out of the train split). include wins precedence; both keep
+        # the original cache order. Used by train_uml.py's --voiced-eval-ids diagnostic.
+        if include_ids is not None:
+            include_ids = set(include_ids)
+            self.samples = [s for s in self.samples if s["sample_id"] in include_ids]
+        if exclude_ids is not None:
+            exclude_ids = set(exclude_ids)
+            self.samples = [s for s in self.samples if s["sample_id"] not in exclude_ids]
         # Target unit is decoupled from the cache: the raw `text` string is stored,
         # so any tokenizer re-encodes it on the fly (no recache per unit).
         self.tokenizer = tokenizer if tokenizer is not None else CharTokenizer()
         self.text_transform = self.tokenizer  # back-compat alias
         self.downsample_factor = int(downsample_factor)
+        # Audio-derived targets (e.g. HuBERT units): {sample_id -> list[int]}. When set,
+        # CTC targets are read from here instead of `tokenizer.text_to_int(text)` — the
+        # transcript can't produce them (cf. tokenizer.targets_from_audio).
+        self.unit_targets = unit_targets
+        if unit_targets is not None:
+            missing = [s["sample_id"] for s in self.samples if s["sample_id"] not in unit_targets]
+            if missing:
+                raise KeyError(
+                    f"unit_targets missing {len(missing)} of {len(self.samples)} sample_ids "
+                    f"(e.g. {missing[0]}). Re-run scripts/precompute_hubert_units.py for split '{split}'."
+                )
 
     def __len__(self):
         return len(self.samples)
@@ -75,8 +97,12 @@ class CachedRawEMGDataset(torch.utils.data.Dataset):
         if raw.size(0) != t * f:
             raw = raw[: t * f]
 
-        # Re-encode the transcript to the configured unit (char/subword/phoneme).
-        text_int = torch.tensor(self.tokenizer.text_to_int(sample["text"]), dtype=torch.long)
+        # Targets: either audio-derived units (precomputed, keyed by sample_id) or the
+        # transcript re-encoded to the configured unit (char/subword/phoneme) on the fly.
+        if self.unit_targets is not None:
+            text_int = torch.tensor(self.unit_targets[sample["sample_id"]], dtype=torch.long)
+        else:
+            text_int = torch.tensor(self.tokenizer.text_to_int(sample["text"]), dtype=torch.long)
 
         session_index = int(sample.get("session_index", sample.get("session_id", 0)))
         session_ids = torch.full((t,), session_index, dtype=torch.long)
@@ -88,6 +114,7 @@ class CachedRawEMGDataset(torch.utils.data.Dataset):
             "session_ids": session_ids,
             "silent": bool(sample.get("silent", False)),
             "book_location": tuple(sample.get("book_location", ("", -1))),
+            "sample_id": sample.get("sample_id", ""),
             "length": t,
         }
 

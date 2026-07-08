@@ -1,0 +1,58 @@
+# Defaults for scripts/train_uml.py with the phase-2 §C TEXT branch.
+# CLI flags override these; these override script-level defaults.
+
+cache_dir: /scratch/cr4206/sEMG-unpaired-text/data
+output_directory: /scratch/cr4206/sEMG-unpaired-text/runs/uml_text
+
+# Auxiliary modality sharing the transformer = unpaired TEXT (denoising-CTC).
+second_branch: text
+text_source: libri          # libri (deduped) | gaddy (in-distribution train transcripts)
+text_cache_dir: /scratch/cr4206/sEMG-unpaired-text/data/text_cache
+text_batch_size: 8
+text_num_workers: 2
+
+# Denoising corruption recipe (see uml/text_dataset.py).
+text_p_mask: 0.15
+text_p_sub: 0.10
+text_p_del: 0.05
+text_mask_span_mean: 3.0
+text_upsample: 3
+text_jitter: 1
+
+# EMG branch: the decided phase-2 config — characters @ 16x.
+unit: char
+downsample_factor: 16
+
+epochs: 200
+max_batch_len: 88000
+fixed_raw_len: 1600
+
+learning_rate: 3.0e-4
+learning_rate_warmup: 1000
+l2: 0.0
+grad_accum_steps: 2   # MUST match train_baseline.yaml (=2) so the EMG stage has the same
+                      # effective batch as the baseline; with 1 the λ=0 control was ~0.027 WER
+                      # worse than baseline purely from the smaller batch (verified by stage-1 eval).
+lr_decay_milestones: [125, 150, 175]
+lr_decay_gamma: 0.5
+clip_grad_norm: 0.0   # phase-1 UML lesson: clip off for the text branch
+
+# total = loss_emg + lambda_uml * loss_text; phase-1 best was the down-weighted 0.3.
+lambda_uml: 0.3
+
+share_ctc_head: false
+epoch_mode: alternate
+
+model_size: 768
+num_layers: 6
+dropout: 0.2
+
+start_training_from: null
+
+eval_method: greedy   # fast leakage-controlled dev signal; final report via the frozen decoder
+
+wandb: false
+wandb_entity: UMLforVideoLab
+wandb_project: JEPAforsEMG
+wandb_run_name: null
+wandb_tags: [uml, text]

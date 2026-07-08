@@ -1,7 +1,7 @@
 """Pluggable target-unit tokenizers for CTC silent-speech training.
 
-Phase-2 axis: predict **characters**, **subwords**, or **phonemes** from EMG, and
-re-train a supervised baseline per unit. A tokenizer is the single source of truth
+Phase-2 axis: predict **characters**, **subwords**, **phonemes**, or **HuBERT units**
+from EMG, and re-train a supervised baseline per unit. A tokenizer is the single source of truth
 for the CTC vocabulary and the decode/score rendering, so the rest of the pipeline
 (dataset → model vocab → CTC blank → beam decoder → WER/CER) stays unit-agnostic.
 
@@ -47,6 +47,11 @@ ARPABET = [
 class BaseTokenizer:
     unit = "base"
     supports_word_lm = False
+    # When True, the CTC targets are NOT a function of the transcript and must be
+    # supplied to the dataset out-of-band (e.g. HuBERT units extracted from audio).
+    # ``text_to_int``/``reference_text`` then have no meaning; the dataset/eval read
+    # the gold id-sequence from a precomputed cache instead.
+    targets_from_audio = False
 
     @property
     def vocab_size(self) -> int:
@@ -231,8 +236,55 @@ class PhonemeTokenizer(BaseTokenizer):
         return " ".join(self._encode_symbols(text))
 
 
+class HubertUnitTokenizer(BaseTokenizer):
+    """Discrete HuBERT acoustic units (k-means cluster IDs) as the CTC target.
+
+    Unlike char/subword/phoneme, a unit sequence is a function of the **audio**, not
+    the transcript, so it cannot be derived from ``text``. Targets are precomputed
+    (``scripts/precompute_hubert_units.py``) from the parallel voiced audio and fed to
+    the dataset via ``unit_targets`` (keyed by ``sample_id``); ``targets_from_audio``
+    flags that to the dataset and the evaluator.
+
+    ``vocab_size`` = k (the k-means K, 100 for the HuBERTVoc km100 model). There is no
+    word LM, so beam decoding is disabled and the dev metric is a **unit error rate**
+    (jiwer over the space-joined unit IDs). The real word-WER comes from re-synthesis
+    (units -> vocoder -> ASR) in ``scripts/eval_hubert_resynth.py``.
+    """
+
+    unit = "hubert"
+    supports_word_lm = False
+    targets_from_audio = True
+
+    def __init__(self, k: int = 100):
+        self.k = int(k)
+
+    @property
+    def vocab_size(self) -> int:
+        return self.k
+
+    @property
+    def labels(self) -> list[str]:
+        return [str(i) for i in range(self.k)]
+
+    def int_to_text(self, ints) -> str:
+        return " ".join(str(int(i)) for i in ints)
+
+    def text_to_int(self, text: str) -> list[int]:
+        raise NotImplementedError(
+            "HuBERT unit targets come from audio, not text. Precompute them with "
+            "scripts/precompute_hubert_units.py and pass unit_targets to the dataset."
+        )
+
+    def reference_text(self, text: str) -> str:
+        raise NotImplementedError(
+            "HuBERT references are gold unit sequences (not text). The evaluator "
+            "renders them from the cached unit ids via int_to_text."
+        )
+
+
 def build_tokenizer(unit: str = "char", *, subword_model: str | None = None,
-                    phoneme_dict: str | None = None, phoneme_g2p=None) -> BaseTokenizer:
+                    phoneme_dict: str | None = None, phoneme_g2p=None,
+                    hubert_k: int = 100) -> BaseTokenizer:
     """Factory selecting the target unit from a config string."""
     unit = (unit or "char").lower()
     if unit == "char":
@@ -243,4 +295,6 @@ def build_tokenizer(unit: str = "char", *, subword_model: str | None = None,
         return SubwordTokenizer(subword_model)
     if unit == "phoneme":
         return PhonemeTokenizer(g2p=phoneme_g2p, dict_path=phoneme_dict)
-    raise ValueError(f"unknown unit: {unit!r} (expected char|subword|phoneme)")
+    if unit == "hubert":
+        return HubertUnitTokenizer(k=hubert_k)
+    raise ValueError(f"unknown unit: {unit!r} (expected char|subword|phoneme|hubert)")

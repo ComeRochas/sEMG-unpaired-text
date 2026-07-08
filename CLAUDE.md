@@ -23,10 +23,25 @@ Priority order (see [TODO.md](TODO.md)):
 1. **Target unit × token resolution** (DONE): swept char/subword/phoneme × resolution.
    **Result: predict CHARACTERS at 16×** (`--unit char --downsample-factor 16`). Coarser than
    the phase-1 8× wins; subwords don't robustly beat char; phonemes dropped. See [TODO.md](TODO.md) §B.
-2. **Text as the unpaired modality** (CURRENT NEXT): add a text branch to the shared transformer
-   (mirroring the kept audio branch), at char-16×, comparing a large generic corpus vs the Gaddy
-   transcripts. See [TODO.md](TODO.md) §C.
-3. **Supervised then unsupervised** settings.
+2. **Unpaired modality UML** (DONE — **NO GAIN**): text branch built + trained, then this round
+   **multi-auxiliary EMG+audio+text** (paper Thm 1, Fisher-info compounding), with seed-matched λ=0
+   controls + EMG finetune. **Result: no unpaired auxiliary (audio, text, or both; CANINE or the
+   stronger ByT5 text encoder) beats a well-trained pure-EMG λ=0 control** — char-16× finetuned dev
+   WER: control best **0.280** vs multi-aux best 0.308; ByT5==CANINE. Seed spread (0.033) > the
+   effect (0.019). EMG→char is ceiling/label-limited (not variance-limited), so UML — a
+   variance-reducer — is the wrong tool at full labels. See [TODO.md](TODO.md) §C.
+   - **Frontend-symmetry follow-up** (tutor critique, DONE — **NO GAIN; HARMFUL**): the audio branch
+     reaches the shared transformer already contextualized by wav2vec2's 12 self-attention layers
+     while EMG arrives conv-only. Tested "equalize down" = conv-only audio frontend
+     (`--audio-frontend conv`, wav2vec2 feature-extractor only, no attention). Matched-source Gaddy:
+     full **0.276** → conv **0.336** (+0.060 WER); on Libri conv (0.288) ties the λ=0 control in CER
+     (audio branch inert). **wav2vec2's transformer IS the transfer source** — the asymmetry is a
+     feature, not a bug; the right symmetry direction (unpursued) is Option 1 (EMG pre-transformer,
+     wav2vec2 kept full). See [TODO.md](TODO.md) §C.2.
+3. **Where next** (see [TODO.md](TODO.md) §D): UML closed; most-promising = **low-label/few-shot
+   UML** (subsample labels 10–50% — UML should help only where variance dominates), EMG-side gains
+   (Conformer, **LLM rescoring** à la Gaddy-2024), and paired CLIP-style EMG↔audio alignment. Any
+   claim needs ≥3–5 seeds + a leakage-free test metric (all deltas are within ±0.02–0.03).
 
 (A Conformer encoder was considered and **deferred** — not in scope now.)
 
@@ -122,6 +137,13 @@ model_size)`) feeds the **same** `nn.Module` transformer (`model.emg_encoder.tra
 as the EMG branch. Inference uses the EMG branch only. **This is the template for the text
 branch** in phase 2: swap `AudioFrontend` for a `TextFrontend` and `uml/audio_dataset.py`
 for a text dataset reader; the shared-transformer plumbing stays.
+
+`AudioFrontend(mode=...)` / `--audio-frontend {full,conv}` sets how much of wav2vec2 runs
+before the shared transformer: `full` (default) = `last_hidden_state` (7 conv layers **+ 12
+self-attention layers**); `conv` = feature-extractor only (`conv_dim[-1]`=512, **no
+attention**), mirroring the conv-only EMG frontend. `out_lengths` are identical (the conv
+extractor sets T'); no recache (cache = raw waveforms). **Result: conv is no better (Libri,
+inert) or much worse (Gaddy 0.276→0.336) — keep `full`.** See [TODO.md](TODO.md) §C.2.
 
 ## Training & evaluation pipeline (carried)
 

@@ -22,7 +22,8 @@ from torch.nn.utils.rnn import pad_sequence
 
 
 class LibriSpeechCharDataset(Dataset):
-    def __init__(self, cache_dir: str, split: str = "train-clean-100"):
+    def __init__(self, cache_dir: str, split: str = "train-clean-100",
+                 unit_targets_path: str | None = None):
         cache_path = Path(cache_dir) / f"{split}.pt"
         if not cache_path.is_file():
             raise FileNotFoundError(
@@ -34,6 +35,17 @@ class LibriSpeechCharDataset(Dataset):
         self.text_int_list: list[torch.Tensor] = payload["text_int"]
         assert len(self.audio_list) == len(self.text_int_list)
         self.version = int(payload.get("version", 1))
+        # UML with HuBERT-unit targets: the audio branch predicts km100 units (same target
+        # space as the EMG branch), not chars. Units are precomputed from THESE waveforms
+        # (scripts/precompute_audio_hubert_units.py) so they align 1:1 by list index.
+        if unit_targets_path is not None:
+            up = torch.load(unit_targets_path, map_location="cpu")["units"]
+            if len(up) != len(self.audio_list):
+                raise ValueError(
+                    f"audio unit targets ({len(up)}) misaligned with cache audio "
+                    f"({len(self.audio_list)}) — re-run precompute_audio_hubert_units.py for {cache_path}"
+                )
+            self.text_int_list = [torch.as_tensor(u, dtype=torch.long) for u in up]
 
     def __len__(self) -> int:
         return len(self.audio_list)

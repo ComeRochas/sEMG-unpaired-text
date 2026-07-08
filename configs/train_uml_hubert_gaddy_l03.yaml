@@ -1,0 +1,52 @@
+# UML (lambda=0.3) — EMG + GADDY-INTERNAL AUDIO sharing the transformer, BOTH predicting HuBERT
+# km100 units. EMG targets = data/hubert_units_voiced (silent->voiced fix); audio targets =
+# data/audio_hubert_units/gaddy_internal.pt (units of the cached Gaddy-internal waveforms).
+# Compare against the lambda=0 baseline run (configs/train_uml_hubert_voiced.yaml).
+
+cache_dir: /scratch/cr4206/sEMG-unpaired-text/data
+librispeech_cache_dir: /scratch/cr4206/sEMG-unpaired-text/data/gaddy_audio_cache
+librispeech_split: gaddy_internal
+output_directory: /scratch/cr4206/sEMG-unpaired-text/runs/uml_hubert_gaddy_l03
+
+unit: hubert
+hubert_k: 100
+hubert_units_dir: /scratch/cr4206/sEMG-unpaired-text/data/hubert_units_voiced
+downsample_factor: 8
+
+# Audio branch predicts the SAME km100 units (the proper UML setup).
+second_branch: audio
+audio_units_dir: /scratch/cr4206/sEMG-unpaired-text/data/audio_hubert_units
+lambda_uml: 0.3
+
+# Hold out 250 voiced utts as a 2nd dev (vdev) — same split as the baseline, apples-to-apples.
+voiced_eval_ids: /scratch/cr4206/sEMG-unpaired-text/data/hubert_units_voiced/voiced_eval_ids.txt
+
+epochs: 200
+max_batch_len: 88000
+fixed_raw_len: 1600
+audio_batch_size: 8
+audio_num_workers: 2
+
+learning_rate: 3.0e-4
+learning_rate_warmup: 1000
+l2: 0.0
+grad_accum_steps: 2
+lr_decay_milestones: [125, 150, 175]
+lr_decay_gamma: 0.5
+clip_grad_norm: 1.0
+
+share_ctc_head: false
+epoch_mode: alternate
+
+model_size: 768
+num_layers: 6
+dropout: 0.2
+
+start_training_from: null
+eval_method: greedy
+
+wandb: false
+wandb_entity: UMLforVideoLab
+wandb_project: JEPAforsEMG
+wandb_run_name: null
+wandb_tags: [uml, hubert, voiced_target, gaddy, l03]
