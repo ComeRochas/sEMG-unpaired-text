@@ -77,9 +77,24 @@ class CachedRawEMGDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.samples)
 
-    def subset(self, fraction: float):
+    def subset(self, fraction: float, seed: int | None = None):
+        """Return a copy keeping a ``fraction`` of the samples.
+
+        ``seed=None`` keeps the original head-slice (deterministic, cache order).
+        With an int ``seed`` the kept subset is a deterministic *random* draw (shuffle
+        by seed, then take the first ``fraction``) — used by the low-label sweep so a
+        given (fraction, seed) always selects the SAME labelled EMG utterances across
+        the control and UML arms.
+        """
         result = copy(self)
-        result.samples = self.samples[: int(fraction * len(self.samples))]
+        n_keep = int(fraction * len(self.samples))
+        if seed is None:
+            result.samples = self.samples[:n_keep]
+        else:
+            order = list(range(len(self.samples)))
+            random.Random(seed).shuffle(order)
+            keep = sorted(order[:n_keep])          # keep cache order among the drawn subset
+            result.samples = [self.samples[i] for i in keep]
         return result
 
     def __getitem__(self, i):

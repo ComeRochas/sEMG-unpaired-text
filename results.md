@@ -188,7 +188,93 @@ Verdict : **conv-only FAILS** — Gaddy full 0.276 → conv 0.336 (+0.060); Libr
 
 date : 07/07/2026
 Experiment run : EMG-private pre-transformer (Option 1) — `--num-private-layers 6` gives the EMG
-branch its own 6-layer attention stack before the shared transformer (encoder 58M→102M params),
-audio kept FULL wav2vec2. char-16×, seed 0, Gaddy + Libri × λ 0.3 / 1.0, + λ=0 same-arch control,
-+ chained EMG finetune (jobs 12861113–12861122, a100).
-Results : **RUNNING — pending.** Comparator = full-frontend Gaddy 0.276 and λ=0 control 0.280.
+branch its own 6-layer attention stack BEFORE the shared transformer (encoder 58M→102M params),
+so EMG arrives contextualized like the audio branch does via wav2vec2's 12 attention layers. Audio
+kept FULL wav2vec2. char-16×, seed 0, Gaddy + Libri × λ 0.3 / 1.0, + λ=0 same-arch control,
++ chained EMG finetune.
+Results : **ALL 5 arms collapsed to the CTC all-blank solution** (dev WER 0.97–1.00, CER ~0.98–1.00;
+a working model is ~0.28). Crucially the **λ=0 control collapsed too** — λ=0 makes the audio branch
+inert, so this is pure supervised EMG with 6 private layers, i.e. the failure has nothing to do with
+UML, the auxiliary, or the frontend-symmetry hypothesis. It is the architecture that will not train.
+Not a wiring bug either: the finetune state-dict loads clean (missing=0 unexpected=0). **This
+experiment says nothing about frontend symmetry** — the model never trained.
+
+date : 07/09/2026 – 07/12/2026
+Experiment run : Diagnostic of that collapse — pure supervised CTC (no UML, no audio, no wav2vec2),
+sweeping `num_private_layers ∈ {0,1,3,4,5,6}` with everything else identical (char-16×,
+conv_strides=(2,2,2,2), LR 3e-4 / warmup 1000, max_batch_len 88000, 25 ep, greedy eval,
+clip_grad_norm = 0). 6 was run twice, independently (`train_baseline.py` has no `--seed`, so init is
+random per run). Also ran a 2×2 depth {0,6} × clip_grad_norm {0.0, 1.0} to rule out clipping.
+Results (final train CTC loss / dev WER, 25 ep) :
+| private layers | loss | dev WER |
+|---|---|---|
+| 0 (baseline) | 0.707 | 0.686 |
+| 1 | 0.633 | 0.671 |
+| 3 | 0.909 | 0.750 |
+| 4 | 0.825 | 0.730 |
+| 5 | 0.751 | 0.702 |
+| **6** | **2.904** | **1.000** |
+| **6 (re-run)** | **2.880** | **1.000** |
+Reads :
+- **The threshold is between 5 and 6.** 0–5 all descend smoothly; 6 collapses. Both independent
+  6-layer runs collapse → not seed luck, it is structural. The signature: 6 tracks the other depths
+  down to loss ≈1.6–1.7 (CER ≈0.55) until ~epoch 10, then the loss **reverses** and locks at the
+  all-blank plateau (≈2.9), WER pinned at 1.0. It was learning, then fell into the CTC all-blank
+  attractor. (12 total from-scratch post-LN attention layers = 6 private + 6 shared.)
+- **Depth × clipping is an INTERACTION** (I got this wrong twice before converging). The 2×2 above
+  only tested depths 0 and 6 — the two depths where clipping happens not to matter — so it misled me
+  into writing "clipping is not the cause". Filling in depth 3 (from the UML runs below) gives the
+  real picture:
+  | private layers | clip_grad_norm = 0.0 | clip_grad_norm = 1.0 |
+  |---|---|---|
+  | 0 | trains | **trains** |
+  | 3 | trains (WER 0.750) | **COLLAPSES** |
+  | 6 | COLLAPSES (~ep10) | COLLAPSES (~ep2) |
+  So: the deeper the private stack, the more fragile it is to an aggressive global-norm brake.
+  clip=1.0 is survivable at depth 0, **lethal from depth 3**, and depth 6 dies regardless.
+  Practical rule: **with private pre-transformer layers, use `clip_grad_norm = 0.0`.**
+- **Adding private layers buys nothing even when it trains**: at 25 ep every depth ≥3 is *worse*
+  than 0–1 layers (0.750 / 0.730 / 0.702 vs 0.686 / 0.671). No evidence the extra EMG-side capacity
+  helps at all.
+Plots : `figures/depth_sweep_emg_loss.png`, `figures/depth_sweep_wer.png`.
+
+date : 07/12/2026 – 07/13/2026
+Experiment run : Final check of Option 1 at a depth that actually trains — full UML with
+`--num-private-layers 3` (audio = FULL wav2vec2), char-16×, seed 0, Gaddy + Libri × λ 0.3 / 1.0,
++ λ=0 same-arch control, + chained EMG-only finetune.
+
+**Infra bug found (and fixed) first:** every **Libri** run collapsed to all-blank — *including the
+λ=0 baseline*, which has an inert audio branch and is therefore just pure supervised EMG. Cause:
+`slurm/train_uml.slurm` passed no `--clip-grad-norm`, so it inherited **`clip_grad_norm: 1.0`** from
+`configs/train_uml.yaml`, while `slurm/train_uml_gaddy_audio.slurm` forces `0.0`. With 3 private
+layers clip=1.0 is lethal (see the interaction table above) → all Libri died, all Gaddy trained.
+Fixed by forcing `0.0` in `train_uml.slurm`; the re-run λ=0 baseline then trains normally.
+
+Results (dev WER / CER — raw UML EMG-branch, then after EMG-only finetune) :
+| arm | raw UML | + finetune |
+|---|---|---|
+| **3 priv, Gaddy λ=0.3** | **0.303 / 0.139** | **0.275 / 0.135** |
+| 3 priv, Gaddy λ=1.0 | 0.344 / 0.160 | 0.281 / 0.133 |
+| *HIST: 0 priv, Gaddy λ=0.3* | *0.308 / 0.146* | *0.276 / 0.132* |
+| *HIST: 0 priv, λ=0 control* | — | *0.280 / 0.139* |
+
+Reads :
+- **The raw-UML gain seems real but evaporates after finetune.** 3 private layers genuinely beat the
+  0-layer run *during* UML training (0.303/0.139 vs 0.308/0.146 — slower start, then it passes it).
+  But after the EMG finetune both land in the same place: **0.275/0.135 vs 0.276/0.132**. A 0.001 WER
+  difference, i.e. nothing, and the CER is actually marginally *worse*. **Option 1 gives no gain.**
+- Everything here (0.275 / 0.276 / 0.280 / 0.281) sits inside the ~0.01 run-to-run WER variance.
+- **Methodological trap worth remembering:** mid-run the finetunes looked clearly *worse* than the
+  historical one (bouncing 0.33–0.50 at ep 80–120) and I nearly killed them. They were simply
+  **before the LR-decay milestones [125, 150, 175]** — the historical run was *also* stuck at 0.360
+  at ep120 and only dropped to 0.276 afterwards. Both of ours dropped the moment the LR halved at
+  ep125. **Never judge a finetune from this pipeline before ~ep 180.**
+- Still running (does not change the verdict): the λ=0 **same-arch** control at 3 private layers
+  (clip=0). It only sharpens attribution; the headline is already settled by the 0-priv comparators.
+
+**Verdict on the whole PHASE 5 (frontend symmetry):** both directions fail. Equalizing *down*
+(conv-only audio, Option 2) destroys the transfer; equalizing *up* (EMG private pre-transformer,
+Option 1) either does not train (≥6 layers) or trains and changes nothing (3 layers). The tutor's
+observation — that audio reaches the shared transformer already contextualized by wav2vec2's 12
+attention layers while EMG arrives conv-only — is factually correct, but **the asymmetry is not what
+was holding UML back.**

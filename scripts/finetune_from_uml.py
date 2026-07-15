@@ -33,6 +33,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from semg_jepa.architecture import BaselineCTCModel, factor_to_strides
+from semg_jepa.augmentations import RawEMGAugment
 from semg_jepa.cached_dataset import CachedRawEMGDataset, build_batches
 from semg_jepa.config_utils import parse_with_config, setup_stdout_logging
 from semg_jepa.ctc_utils import evaluate
@@ -111,8 +112,19 @@ def parse_args():
     p.add_argument("--conv-strides", type=int, nargs="+", default=[2, 2, 2])
     p.add_argument("--downsample-factor", type=int, default=None)
     # MUST match the UML checkpoint's --num-private-layers (Option 1 EMG pre-transformer),
-    # else the encoder state dict won't align.
+    # else the encoder state dict won't align. --no-private-gate must also match (the gate adds
+    # a private_gate_scale parameter to the state dict).
     p.add_argument("--num-private-layers", type=int, default=0)
+    p.add_argument("--no-private-gate", action="store_true")
+    # Low-label sweep: finetune on the SAME seeded EMG subset as the UML ckpt being resumed.
+    p.add_argument("--label-fraction", type=float, default=1.0)
+    p.add_argument("--label-subset-seed", type=int, default=0)
+    # EMG augmentation (strong-aug regularizer for the few-shot finetune).
+    p.add_argument("--emg-channel-dropout", type=float, default=0.0)
+    p.add_argument("--emg-time-mask-prob", type=float, default=0.0)
+    p.add_argument("--emg-time-mask-max", type=int, default=0)
+    p.add_argument("--emg-noise-std", type=float, default=0.0)
+    p.add_argument("--emg-amp-scale", type=float, default=0.0)
     p.add_argument("--eval-method", choices=["greedy", "beam"], default="beam")
     p.add_argument("--wandb", action="store_true")
     p.add_argument("--wandb-entity", default="UMLforVideoLab")
@@ -143,6 +155,11 @@ def train(args):
     )
     n_chars = tokenizer.vocab_size
     trainset = CachedRawEMGDataset(args.cache_dir, "train", tokenizer=tokenizer, downsample_factor=factor)
+    if args.label_fraction < 1.0:
+        n_full = len(trainset)
+        trainset = trainset.subset(args.label_fraction, seed=args.label_subset_seed)
+        logging.info("low-label: kept %d/%d train utts (fraction=%.3f, subset_seed=%d)",
+                     len(trainset), n_full, args.label_fraction, args.label_subset_seed)
     devset = CachedRawEMGDataset(args.cache_dir, "dev", tokenizer=tokenizer, downsample_factor=factor)
     logging.info("unit=%s vocab=%d conv_strides=%s factor=%d", args.unit, n_chars, conv_strides, factor)
 
@@ -153,6 +170,7 @@ def train(args):
         vocab_size=n_chars,
         conv_strides=conv_strides,
         num_private_layers=args.num_private_layers,
+        private_gate=not args.no_private_gate,
     ).to(device)
 
     ckpt_path = args.emg_branch or args.uml_full_ckpt
@@ -186,6 +204,25 @@ def train(args):
         if iteration <= args.learning_rate_warmup:
             set_lr(iteration * args.learning_rate / args.learning_rate_warmup)
 
+    emg_augment = RawEMGAugment(
+        channel_dropout=args.emg_channel_dropout,
+        time_mask_prob=args.emg_time_mask_prob,
+        time_mask_max=args.emg_time_mask_max,
+        noise_std=args.emg_noise_std,
+        amp_scale=args.emg_amp_scale,
+    )
+    emg_augment_enabled = (
+        args.emg_channel_dropout > 0
+        or (args.emg_time_mask_prob > 0 and args.emg_time_mask_max > 0)
+        or args.emg_noise_std > 0
+        or args.emg_amp_scale > 0
+    )
+    if emg_augment_enabled:
+        logging.info("EMG augment: channel_dropout=%.3f time_mask_prob=%.3f time_mask_max=%d "
+                     "noise_std=%.3f amp_scale=%.3f", args.emg_channel_dropout,
+                     args.emg_time_mask_prob, args.emg_time_mask_max, args.emg_noise_std,
+                     args.emg_amp_scale)
+
     os.makedirs(args.output_directory, exist_ok=True)
     run_ts = time.strftime("%Y%m%d_%H%M")
     best_wer = float("inf")
@@ -213,6 +250,8 @@ def train(args):
 
             t1 = time.perf_counter()
             raw = combine_fixed_length(example["raw_emg"], args.fixed_raw_len).to(device)
+            if emg_augment_enabled and model.training:
+                raw = emg_augment(raw)
             pred = F.log_softmax(model(raw), dim=-1)
             pred = nn.utils.rnn.pad_sequence(decollate_tensor(pred, example["lengths"]), batch_first=False)
             targets = nn.utils.rnn.pad_sequence(example["text_int"], batch_first=True).to(device)

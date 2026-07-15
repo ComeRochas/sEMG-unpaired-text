@@ -63,6 +63,8 @@ def train(args):
         dropout=args.dropout,
         vocab_size=tokenizer.vocab_size,
         conv_strides=conv_strides,
+        num_private_layers=args.num_private_layers,
+        private_gate=not args.no_private_gate,
     ).to(device)
 
     if args.start_training_from:
@@ -188,6 +190,12 @@ def parse_args():
                    help="Max grad norm before optim.step (0 disables).")
     p.add_argument("--model-size", type=int, default=768)
     p.add_argument("--num-layers", type=int, default=6)
+    p.add_argument("--num-private-layers", type=int, default=0,
+                   help="Extra transformer layers before the shared/main transformer "
+                        "(diagnostic for the Option-1 collapse; 0 = original encoder).")
+    p.add_argument("--no-private-gate", action="store_true",
+                   help="Disable the zero-init LayerScale gate around the private pre-transformer "
+                        "(default: gated). Without it, private>=6 collapses to all-blank.")
     p.add_argument("--dropout", type=float, default=0.2)
     # Phase-2 knobs: target unit and EMG token temporal resolution.
     p.add_argument("--unit", choices=["char", "subword", "phoneme"], default="char",

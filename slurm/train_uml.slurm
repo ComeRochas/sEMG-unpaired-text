@@ -56,12 +56,14 @@ SHARE_FLAG=""
 EPOCH_MODE_FLAG=""
 [[ -n "$EPOCH_MODE" ]] && EPOCH_MODE_FLAG="--epoch-mode $EPOCH_MODE"
 
+
 "$PYTHON" -u scripts/train_uml.py \
   --config configs/train_uml.yaml \
   --cache-dir "$CACHE_DIR" \
   --librispeech-cache-dir "$LIBRI_CACHE_DIR" \
   --librispeech-split "$LIBRI_SPLIT" \
   --output-directory "$OUTPUT_DIR" \
+  --clip-grad-norm 0.0 \
   $SHARE_FLAG $EPOCH_MODE_FLAG $EXTRA_FLAGS \
   --wandb
 

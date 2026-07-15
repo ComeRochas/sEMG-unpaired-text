@@ -174,6 +174,11 @@ def parse_args():
     # bypass these layers. MUST match --num-private-layers at finetune time.
     p.add_argument("--num-private-layers", type=int, default=0,
                    help="EMG-private transformer layers before the shared transformer (Option 1).")
+    p.add_argument("--no-private-gate", action="store_true",
+                   help="Disable the zero-init LayerScale gate around the private pre-transformer "
+                        "(default: gated). num_private_layers>=6 WITHOUT the gate collapses to the "
+                        "CTC all-blank attractor within ~10 epochs (confirmed 2026-07, independent "
+                        "of clip_grad_norm) — only disable for that specific ablation.")
     p.add_argument("--epoch-mode", choices=["alternate", "both"], default="alternate",
                    help="alternate (default): each step does 1 EMG batch + 1 audio "
                         "batch (paired backward, one optim.step). Epoch ends after "
@@ -200,6 +205,27 @@ def parse_args():
                    help="Per-sample probability of applying a single time mask.")
     p.add_argument("--emg-time-mask-max", type=int, default=0,
                    help="Maximum width (in raw samples) of the EMG time mask.")
+    p.add_argument("--emg-noise-std", type=float, default=0.0,
+                   help="Std of additive Gaussian noise on EMG batches (strong-aug for low-label).")
+    p.add_argument("--emg-amp-scale", type=float, default=0.0,
+                   help="Per-sample amplitude jitter magnitude on EMG batches (0=off).")
+    # ---- Low-label / few-shot UML sweep ----
+    # Subsample the LABELLED EMG train set to a fraction (dev + audio stay full). The subset is a
+    # deterministic random draw keyed by --label-subset-seed, so control (lam=0) and UML (lam>0)
+    # at the same seed see the SAME labelled utterances.
+    p.add_argument("--label-fraction", type=float, default=1.0,
+                   help="Fraction of labelled EMG train utts to keep (1.0 = all).")
+    p.add_argument("--label-subset-seed", type=int, default=0,
+                   help="Seed selecting WHICH utts are kept when --label-fraction < 1.")
+    # Step-based training (few-shot): when set, train for a FIXED number of optim steps regardless
+    # of label fraction (the small EMG set cycles while audio progresses over LibriSpeech), with
+    # frequent dev eval + early stopping. Absent -> the epoch-based loop (unchanged).
+    p.add_argument("--max-steps", type=int, default=None,
+                   help="Total optim steps (step-based few-shot mode). None -> epoch loop.")
+    p.add_argument("--eval-every", type=int, default=500,
+                   help="Step-based mode: eval dev + checkpoint every N steps.")
+    p.add_argument("--patience", type=int, default=25,
+                   help="Step-based mode: stop after this many evals with no dev-WER improvement.")
     return parse_with_config(p)
 
 
@@ -267,6 +293,12 @@ def train(args):
     trainset = CachedRawEMGDataset(args.cache_dir, "train", tokenizer=tokenizer,
                                    downsample_factor=factor, unit_targets=train_units,
                                    exclude_ids=voiced_eval_ids)
+    # Low-label sweep: keep only a (seeded) random fraction of the labelled EMG train set.
+    if args.label_fraction < 1.0:
+        n_full = len(trainset)
+        trainset = trainset.subset(args.label_fraction, seed=args.label_subset_seed)
+        logging.info("low-label: kept %d/%d train utts (fraction=%.3f, subset_seed=%d)",
+                     len(trainset), n_full, args.label_fraction, args.label_subset_seed)
     devset = CachedRawEMGDataset(args.cache_dir, "dev", tokenizer=tokenizer,
                                  downsample_factor=factor, unit_targets=dev_units)
     vdevset = None
@@ -340,6 +372,7 @@ def train(args):
         share_ctc_head=bool(args.share_ctc_head),
         conv_strides=conv_strides,
         num_private_layers=args.num_private_layers,
+        private_gate=not args.no_private_gate,
         aux_branches=tuple(aux_names),
         audio_frontend_mode=args.audio_frontend,
         text_frontend=args.text_frontend,
@@ -401,15 +434,21 @@ def train(args):
         channel_dropout=args.emg_channel_dropout,
         time_mask_prob=args.emg_time_mask_prob,
         time_mask_max=args.emg_time_mask_max,
+        noise_std=args.emg_noise_std,
+        amp_scale=args.emg_amp_scale,
     )
     emg_augment_enabled = (
         args.emg_channel_dropout > 0
         or (args.emg_time_mask_prob > 0 and args.emg_time_mask_max > 0)
+        or args.emg_noise_std > 0
+        or args.emg_amp_scale > 0
     )
     if emg_augment_enabled:
         logging.info(
-            "EMG augment: channel_dropout=%.3f time_mask_prob=%.3f time_mask_max=%d",
+            "EMG augment: channel_dropout=%.3f time_mask_prob=%.3f time_mask_max=%d "
+            "noise_std=%.3f amp_scale=%.3f",
             args.emg_channel_dropout, args.emg_time_mask_prob, args.emg_time_mask_max,
+            args.emg_noise_std, args.emg_amp_scale,
         )
 
     def _make_emg_loader():
@@ -489,6 +528,101 @@ def train(args):
         return loss_text.item()
 
     step_of = {"audio": _audio_step, "text": _text_step}
+
+    # ------------------------------------------------------------------
+    # Step-based few-shot training (low-label sweep): a FIXED number of optim
+    # steps regardless of label fraction. The (small) EMG set cycles — reshuffled
+    # each pass — while the aux loader progresses over LibriSpeech, so the auxiliary
+    # is equally trained at every fraction. Frequent dev eval + early stopping;
+    # a lambda=0 control skips the aux branch entirely (EMG-only fast path).
+    # ------------------------------------------------------------------
+    if args.max_steps:
+        model.train()
+        active_aux = [a for a in aux_specs if a["lam"] > 0]
+        if not active_aux:
+            logging.info("step-based: all aux lambda=0 -> CONTROL (aux branch skipped, EMG-only)")
+        milestones_steps = [int(f * args.max_steps) for f in (0.625, 0.75, 0.875)]
+        logging.info("step-based: max_steps=%d eval_every=%d patience=%d lr_milestones(steps)=%s",
+                     args.max_steps, args.eval_every, args.patience, milestones_steps)
+
+        def step_lr(step):
+            if step < args.learning_rate_warmup:
+                set_lr((step + 1) * args.learning_rate / max(1, args.learning_rate_warmup))
+            else:
+                n_dec = sum(1 for m in milestones_steps if step >= m)
+                set_lr(args.learning_rate * (args.lr_decay_gamma ** n_dec))
+
+        def emg_batch_gen():
+            while True:                                   # reshuffles each pass over the subset
+                loader_local, _ = _make_emg_loader()
+                for b in loader_local:
+                    yield b
+        emg_gen = emg_batch_gen()
+        aux_iters = {a["name"]: iter(a["loader"]) for a in active_aux}
+
+        def next_aux(a):
+            try:
+                return next(aux_iters[a["name"]])
+            except StopIteration:
+                aux_iters[a["name"]] = iter(a["loader"])  # linear pass over LibriSpeech, then reshuffle
+                return next(aux_iters[a["name"]])
+
+        t = {k: 0.0 for k in ("data_emg", "data_audio", "fwd_emg", "bwd_emg",
+                              "fwd_audio", "bwd_audio", "opt")}
+        emg_losses, aux_losses = [], {a["name"]: [] for a in active_aux}
+        evals_no_improve = 0
+        t_train0 = time.perf_counter()
+        for step in range(args.max_steps):
+            step_lr(step)
+            emg_losses.append(_emg_step(next(emg_gen), t))
+            for a in active_aux:
+                aux_losses[a["name"]].append(step_of[a["name"]](next_aux(a), t, a["lam"]))
+            if (step + 1) % args.grad_accum_steps == 0:
+                if args.clip_grad_norm and args.clip_grad_norm > 0:
+                    nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
+                optim.step()
+                optim.zero_grad()
+
+            if (step + 1) % args.eval_every == 0 or (step + 1) == args.max_steps:
+                model.eval()
+                wer, cer = evaluate(eval_wrapper, devset, device, method=eval_method)
+                model.train()
+                train_emg = float(np.mean(emg_losses)) if emg_losses else 0.0
+                train_aux = {n: (float(np.mean(v)) if v else 0.0) for n, v in aux_losses.items()}
+                cur_lr = optim.param_groups[0]["lr"]
+                improved = wer < best_wer
+                logging.info(
+                    "step=%d/%d lr=%.2e emg_loss=%.4f %s dev_wer=%.3f dev_cer=%.3f best=%.3f "
+                    "no_improve=%d t=%.0fs",
+                    step + 1, args.max_steps, cur_lr, train_emg,
+                    " ".join(f"{a['name']}_loss={train_aux[a['name']]:.4f}(lam{a['lam']:.2f})"
+                             for a in active_aux) or "(control)",
+                    wer, cer, min(best_wer, wer), evals_no_improve, time.perf_counter() - t_train0,
+                )
+                wandb_log(run, {
+                    "eval/wer": wer, "eval/cer": cer, "train/emg_loss": train_emg,
+                    **{f"train/{a['name']}_loss": train_aux[a["name"]] for a in active_aux},
+                    "train/lr": cur_lr, "step": step + 1,
+                })
+                torch.save(model.state_dict(), os.path.join(args.output_directory, "last.pt"))
+                _save_emg_branch(model, os.path.join(args.output_directory, "last_emg_branch.pt"))
+                if improved:
+                    best_wer = wer
+                    evals_no_improve = 0
+                    torch.save(model.state_dict(), os.path.join(args.output_directory, "best.pt"))
+                    _save_emg_branch(model, os.path.join(args.output_directory, "best_emg_branch.pt"))
+                else:
+                    evals_no_improve += 1
+                    if evals_no_improve >= args.patience:
+                        logging.info("early stop @ step %d (no dev improvement for %d evals; best=%.3f)",
+                                     step + 1, args.patience, best_wer)
+                        break
+                emg_losses, aux_losses = [], {a["name"]: [] for a in active_aux}
+
+        torch.save(model.emg_encoder.state_dict(),
+                   os.path.join(args.output_directory, "pretrained_encoder.pt"))
+        finish_wandb(run)
+        return
 
     for epoch in range(args.epochs):
         model.train()

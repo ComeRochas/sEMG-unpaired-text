@@ -236,6 +236,7 @@ class UMLModel(nn.Module):
         share_ctc_head: bool = False,
         conv_strides=(2, 2, 2),
         num_private_layers: int = 0,
+        private_gate: bool = True,
         second_branch: str = "audio",
         aux_branches: tuple[str, ...] | None = None,
         audio_frontend_mode: str = "full",
@@ -263,6 +264,7 @@ class UMLModel(nn.Module):
         self.emg_encoder = GaddyRawEMGEncoder(
             model_size=model_size, num_layers=num_layers, dropout=dropout,
             conv_strides=conv_strides, num_private_layers=num_private_layers,
+            private_gate=private_gate,
         )
         if "text" in aux_branches:
             self.text_frontend = TextFrontend(

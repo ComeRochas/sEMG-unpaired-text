@@ -77,7 +77,7 @@ class GaddyRawEMGEncoder(nn.Module):
     """
 
     def __init__(self, model_size=768, num_layers=6, dropout=0.2, apply_train_shift=True,
-                 conv_strides=(2, 2, 2), num_private_layers=0):
+                 conv_strides=(2, 2, 2), num_private_layers=0, private_gate=True):
         super().__init__()
         self.apply_train_shift = apply_train_shift
         self.conv_strides = tuple(conv_strides)
@@ -109,6 +109,20 @@ class GaddyRawEMGEncoder(nn.Module):
         # state-dict keys), so old checkpoints keep loading.
         self.num_private_layers = int(num_private_layers)
         self.pre_transformer = _make_transformer(self.num_private_layers) if self.num_private_layers > 0 else None
+
+        # Diagnostic (2026-07): num_private_layers=6 (12 total from-scratch post-LN attention
+        # layers before the CTC head) collapses to the CTC all-blank attractor within ~10 epochs
+        # of pure supervised training — confirmed independent of clip_grad_norm (0.0 and 1.0 both
+        # collapse; private=0/1/3 train fine at either clip). Root cause: a deep from-scratch
+        # post-LN stack makes a large, unconstrained representational jump at init, and CTC's
+        # all-blank minimum is right there to fall into. Fix: LayerScale-style residual gate,
+        # a per-channel scale initialized to 0 around the WHOLE pre_transformer stack, so at
+        # init pre_transformer is an exact no-op (output == input, identical to private=0) and
+        # can only start contributing once gradients pull it away from zero.
+        self.private_gate = bool(private_gate) and self.pre_transformer is not None
+        if self.private_gate:
+            self.private_gate_scale = nn.Parameter(torch.zeros(model_size))
+
         self.transformer = _make_transformer(num_layers)
 
     def forward(self, raw_emg: torch.Tensor) -> torch.Tensor:
@@ -125,7 +139,12 @@ class GaddyRawEMGEncoder(nn.Module):
         x_raw = x_raw.transpose(1, 2)
         x_raw = self.w_raw_in(x_raw)
         if self.pre_transformer is not None:
-            x_raw = self.pre_transformer(x_raw.transpose(0, 1)).transpose(0, 1)
+            pre_in = x_raw.transpose(0, 1)
+            pre_out = self.pre_transformer(pre_in)
+            if self.private_gate:
+                # gate starts at 0 -> pre_out == pre_in -> exact no-op at init.
+                pre_out = pre_in + self.private_gate_scale * (pre_out - pre_in)
+            x_raw = pre_out.transpose(0, 1)
         x = self.transformer(x_raw.transpose(0, 1)).transpose(0, 1)
         return x
 
@@ -143,11 +162,12 @@ class CTCHead(nn.Module):
 
 class BaselineCTCModel(nn.Module):
     def __init__(self, model_size=768, num_layers=6, dropout=0.2, vocab_size=37,
-                 conv_strides=(2, 2, 2), num_private_layers=0):
+                 conv_strides=(2, 2, 2), num_private_layers=0, private_gate=True):
         super().__init__()
         self.encoder = GaddyRawEMGEncoder(
             model_size=model_size, num_layers=num_layers, dropout=dropout,
             conv_strides=conv_strides, num_private_layers=num_private_layers,
+            private_gate=private_gate,
         )
         self.ctc_head = CTCHead(model_size=model_size, vocab_size=vocab_size)
 
